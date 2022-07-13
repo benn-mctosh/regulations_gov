@@ -1,7 +1,7 @@
 ---
 title: "Scraping comments from regulations.gov"
-author: "Harald Kliems"
-date: "3/18/2022"
+author: "Harald Kliems, Bennett McIntosh"
+date: "`r format(Sys.time(), '%d %B, %Y')`"
 output: html_document
 ---
 
@@ -13,18 +13,17 @@ knitr::opts_chunk$set(echo = TRUE)
 
 For a research project, we need to scrape comments submitted to the Environmental Protection Agency on a proposed rule. The comments are posted on [regulations.gov](https://www.regulations.gov/document/EPA-HQ-OA-2018-0259-9322/comment).
 
-Documentation for the regulations.gov is available [here](https://open.gsa.gov/api/regulationsgov/). An API key can be requested [here](https://api.data.gov/signup/). Make sure to save the API key in your `renviron`.
+Documentation for the regulations.gov is available [here](https://open.gsa.gov/api/regulationsgov/). An API key can be requested [here](https://api.data.gov/signup/). The below assumes you have saved your API key as "regulations_gov_key" in your `renviron`.
+
+In this first code chunk, we also import several libraries.
 
 ```{r}
 library(jsonlite)
 library(httr)
 library(tidyverse)
+library(pdftools)
 
 api_key <- Sys.getenv("regulations_gov_key")
-
-
-
-
 
 ```
 
@@ -64,6 +63,7 @@ view(comments$data)
 ```
 
 We can only retrieve 250 comments at a time. So we build a function that takes a numeric argument for `page[number]` argument in the API call and returns the data component:
+
 ```{r}
 retrieve_comment_ids <- function(page, last_mod = ""){
   if_else(last_mod == "",
@@ -95,10 +95,10 @@ retrieve_comment_ids <- function(page, last_mod = NA){
 comments$data
 }
 ```
+
 Then we can use `map_df` to go through 250 comments at a time. The total number of comments is available in the `$meta$totalElements`. In addition to the limitation of only getting 250 comments at a time, the API also has a rate limit of 1000 requests per hour. Finally, there is a limit of retrieving only 5000 comments by paging through. All of this requires another function.
 
-
-https://api.regulations.gov/v4/comments?filter[commentOnId]=09000064846eebaf&filter[lastModifiedDate][ge]=2020-08-10 11:58:52&page[size]=250&page[number]=N&sort=lastModifiedDate,documentId&api_key=DEMO_KEY
+[https://api.regulations.gov/v4/comments?filter[commentOnId]=09000064846eebaf&filter[lastModifiedDate][ge]=2020-08-10](https://api.regulations.gov/v4/comments?filter%5BcommentOnId%5D=09000064846eebaf&filter%5BlastModifiedDate%5D%5Bge%5D=2020-08-10){.uri} 11:58:52&page[size]=250&page[number]=N&sort=lastModifiedDate,documentId&api_key=DEMO_KEY
 
 ```{r}
 retrieve_all_comment_ids <- function(n){
@@ -120,8 +120,6 @@ pages <- comments
 comment_ids <- map_df(1:37, retrieve_comment_ids)
 
 ```
-
-
 
 Let's get a single comment:
 
@@ -147,10 +145,23 @@ download.file(single_comment$included$attributes$fileFormats[[1]]$fileUrl, destf
 ```
 
 ```{r}
-library(pdftools)
 pdf_text("attachments/test.pdf")
 ```
 
 # Questions
-- Can there be more than one attachment?
-- Are all attachments OCR'd?
+
+-   Can there be more than one attachment?
+-   BM: YES
+-   Are all attachments OCR'd?
+-   BM: Not necessarily. Even if all PDFs are OCR'd, there may be other visual media. From the FAQs: "You can attach up to 20 files, but each file cannot exceed 10MB. Valid file types include: .bmp, .docx, .gif, .jpeg, .jpg, .pdf, .png, .pptx, .rtf, .sgml, .tif, .tiff, .txt, .wpd, .xlsx, .xml." For now, it may be best to assume all attachments are OCR'd PDFs, get alerts when they're not (PDFs that look blank, and other filetypes?) and handle those in the future
+
+# To-dos
+
+-   Consider contacting data.gov helpdesk to increase rate limit to 2000 requests/hr. Other limits may be similarly flexible
+-   Add exception handling to know how many non-OCR'd PDFs and non-PDF attachments we're getting
+-   Briefly familiarize yourself with the following libraries:
+-   pdftools
+-   jsonlite
+-   httr
+-   tidyverse
+-   Discuss how these files will be coded: should we concatenate all text?

@@ -27,7 +27,7 @@ api_key <- Sys.getenv("regulations_gov_key")
 
 ```
 
-We use the `httr` package to retrieve summary information for the docket ID:
+We use the `httr` package to retrieve summary information for the docket ID. Here, we're using the docket ID "EPA-HQ-OA-2018-0259"
 
 ```{r}
 df <- GET(url = paste0("https://api.regulations.gov/v4/documents?filter[docketId]=EPA-HQ-OA-2018-0259&api_key=", api_key))

@@ -1,228 +1,408 @@
 ---
-title: "Scraping comments from regulations.gov"
-author: "Harald Kliems, Bennett McIntosh"
-date: "`r format(Sys.time(), '%d %B, %Y')`"
+title: "Scraping comments from Regulations.Gov"
+author: "Harald Klimes, Bennett McIntosh"
+date: "2022-07-21"
 output: html_document
 ---
 
 ```{r setup, include=FALSE}
-# configure knitr
 knitr::opts_chunk$set(echo = TRUE)
+
+demo = TRUE #Turn off to stop the demo calls beneath several of the functions below
 ```
 
-# Background
+# Background and Prerequesites
 
 For a research project, we need to scrape comments submitted to the Environmental Protection Agency on a proposed rule. The comments are posted on [regulations.gov](https://www.regulations.gov/document/EPA-HQ-OA-2018-0259-9322/comment).
 
-Documentation for the regulations.gov is available [here](https://open.gsa.gov/api/regulationsgov/). An API key can be requested [here](https://api.data.gov/signup/). The below code assumes you have saved your API key as "regulations_gov_key" in your `renviron`.
+We would like this scraping to produce:
+
+1)  A data frame containing the text of every comment on the docket, as well as assorted metadata about the comments and the docket such as submitter name/type and objectID
+
+2)  A directory containing PDFs (or similar NVivo-legible document) of every comment, in subdirectories named by comment ID for future search/analysis. The documents in this directory should include both the attachments to the comments themselves, as well as a holistic document, with a table of contents, that combines the comment and all attachments
+
+Documentation for the regulations.gov is available [here](https://open.gsa.gov/api/regulationsgov/). An API key can be requested [here](https://api.data.gov/signup/). The below code assumes you have saved your API key as "regulations_gov_key" in your `renviron`. We also make use of a few libraries
 
 ```{r}
-#import libraries. Ignoring the conflicts identified with stats::filter(), stats::lag(), and jsonlite::flatten() for now
 library(jsonlite)
 library(httr)
 library(tidyverse)
 library(pdftools)
+library(dplyr)
+library(stringr)
 
-#get api_key from the R environment
 api_key <- Sys.getenv("regulations_gov_key")
-
-#setting a couple of project-specific IDs to avoid hardcoding
-docketID <- "EPA-HQ-OA-2018-0259"
 
 ```
 
-We use the `httr` package to retrieve summary information for the docket ID. Here, we're using the docket ID "EPA-HQ-OA-2018-0259" . Additionally filtering for "Proposed Rule" during the `GET()` call allows us to pull all four documents of `documentType` "Proposed Rule" in one `GET()` call (rather than paging through several pages of documents, mostly of `documentType` "Supporting & Related Material")
+# Affordances and constraints
+
+## Rate Limits
+
+The GSA imposes a [rate limit](https://api.data.gov/docs/rate-limits/) of 1000 requests per hour (on a rolling basis) for the api keys it distributes. To avoid running afoul of these, we use a wrapper for the GET() function that simply pauses execution when we approach the limits. This is not the most efficient solution, since the rate limits function on a rolling basis (so if we made our first request at 10:15 and our 1000th at 10:25 we could start making new requests at 11:15, not 11:25), but it will serve for the scale at which we are working
 
 ```{r}
-df <- GET(url = paste0("https://api.regulations.gov/v4/documents?filter[docketId]=",
-                       docketID,
-                       "&filter[documentType]=Proposed%20Rule&api_key=",
-                       api_key))
+get_or_wait <- function(url) {
+  
+  # GET the item from the URL given
+  r <- GET(url)
+  
+  # Your remaining requests before the rate limit are stored in r$headers
+  remaining <- as.integer(r$headers$`x-ratelimit-remaining`)
+  
+  # If remaining requests are low, sleep for an hour and then resume execution, reporting the action in "log.txt"
+  if (remaining < 5) {
+    pauseTime <- lubridate::now()
+    cat(paste0("\n APPROACHING RATE LIMIT: pausing until 1hr from ", pauseTime, "\n",
+               "requests remaining currently: ", remaining, "\n"),
+        file = "log.txt", append = TRUE)
+    Sys.sleep(3600)
+    restartTime <- lubridate::now()
+    r <- GET(url)
+    remaining <- as.integer(r$headers$`x-ratelimit-remaining`)
+    cat(paste0("Restarting at ", restartTime, "; requests remaining currently: ", remaining, "\n"))
+  }
+  return(r)
+}
+```
+
+## Page limits
+
+In addition to the rate limits mentioned above, the GSA places a few other limits on the API:
+
+1)  When pulling a page of comments, the page may not be larger than 250 comments
+
+2)  When paging through several pages of comments, you may only access up to 20 pages (i.e. calls for page 21+ of a search are not valid)
+
+This effectively means that no search can return more than 5,000 comments. For dockets with \~9k and \~22k comments, this is an issue! The GSA [currently recommends](https://open.gsa.gov/api/regulationsgov/#there-are-strict-pagination-limits-in-v4-how-do-i-retrieve-all-comments-in-a-docket-posted-on-the-same-day-if-the-number-of-comments-is-greater-than-2500) (in beta versions of v4 of the API) that you get around these issues by sorting your search results by `lastModifiedDate`, and then running several searches in series, each of which filters out items with a `lastModifiedDate` before the most recent result in your previous search. We will need to run 2 different searches for our 9k comments, and 5 for our 22k comments
+
+The function below will assist us in paging through these searches. It gives us a page of comments, sorted by `lastModifiedDate`, and with comments with a `lastModifiedDate` before `last_mod` filtered out if needed. pSize defaults to the max, 250, but may be set as low as 5 (usually for testing purposes). Note that getting a page of comments on a given document requires that document's objectID, which we will find below.
+
+```{r}
+getAPageOfComments <- function(page, objectID, last_mod = "", pSize = 250){
+  if (last_mod == "") {
+    url <- paste0("https://api.regulations.gov/v4/comments?filter[commentOnId]=",
+                  objectID, "&page[size]=", pSize, "&page[number]=", page,
+                  "&sort=lastModifiedDate,documentId&api_key=", api_key)
+  } else {
+    url <- paste0("https://api.regulations.gov/v4/comments?filter[commentOnId]=",
+                  objectID, "&filter[lastModifiedDate][ge]=", sub(" ", "%20", last_mod), 
+                  "&page[size]=", pSize, "&page[number]=", page, 
+                  "&sort=lastModifiedDate,documentId&api_key=", api_key)
+  }
+  # print(paste("getting a page of comments from", url))
+  raw_comments <- get_or_wait(url)  
+  comments <- fromJSON(rawToChar(raw_comments$content)) 
+  return(comments)
+}
+```
+
+# Targeting the right comments
+
+## What are our objectIDs?
+
+Every proposed rule, promulgated rule, comment, or supporting document has a unique `objectID`, a 16-character alphanumeric (since the only letters I've seen are a-f, presumably these are hexidecimal numbers somewhere in GSA's back-end). Within a given rulemaking process or "docket," they also share a `docketID`, which is more human-readable.
+
+We use the `httr` package to retrieve summary information for the docket ID. Here, we're using the docket ID "EPA-HQ-OA-2018-0259" - your docket ID can be discovered by searching for your rule/proposal on [regulations.gov](regulations.gov). Additionally filtering for "Proposed Rule" during the `GET()` call allows us to pull all four documents of `documentType` "Proposed Rule" in one `GET()` call (rather than paging through several pages of documents, mostly of `documentType` "Supporting & Related Material")
+
+```{r}
+
+docketID <- "EPA-HQ-OA-2018-0259"
+
+if (demo) { 
+  df <- get_or_wait(url = paste0("https://api.regulations.gov/v4/documents?filter[docketId]=",
+                         docketID, "&filter[documentType]=Proposed%20Rule&api_key=",
+                         api_key)) 
+}
 ```
 
 With `jsonlite` we can parse the response and identify the object IDs for proposed rule:
 
 ```{r}
-
-df2 <- fromJSON(rawToChar(df$content))
-
-df2$data$attributes %>% 
-  filter(documentType == "Proposed Rule")
+if (demo) { 
+  df2 <- fromJSON(rawToChar(df$content))
+  
+  df2$data$attributes %>% 
+    filter(documentType == "Proposed Rule")
+}
 ```
 
 We can see that the docket includes four documents of documentType "Proposed Rule": the original one from 2018, a modified one in 2020, and one deadline extension for each.
 
-The deadline extensions do not appear to have any associated comments, and have subtype "Extension of Comment Period," which we can use to filter them out. Now the objectIDs allow retrieval of comments through the comments endpoint of the API
+The deadline extensions do not appear to have any associated comments, and have subtype "Extension of Comment Period," which we can use to filter them out.
 
-We can see from df2 that the objectId of the 2018 proposed rule is "090000648320bc9e", and for the 2020 proposed rule is "09000064846eebaf". I need to learn more about jsonlite to set the object IDs automatically, for now we are manually entering the object IDs into the list named `objectIDs`.
+We can see from df2 that the objectId of the 2018 proposed rule is "090000648320bc9e", and for the 2020 supplement is "09000064846eebaf". These will allow retrieval of comments through the comments endpoint of the API
+
+For now, we will focus on the 2018 proposed rule:
 
 ```{r}
-
-objectIDs <- list("090000648320bc9e","0900006484450a29")
-
-# df2$data$attributes %>% 
-#   filter(subtype != "Extension of Comment Period") %>% 
-#   pull()
-
+oID <- "090000648320bc9e"
 ```
 
-```{r}
+## How many comments?
 
-comments <- GET(paste0("https://api.regulations.gov/v4/comments?filter[commentOnId]=",
-                       objectIDs[1], "&api_key=", api_key))
-
-
-df <- GET(paste0("https://api.regulations.gov/v4/comments?filter[commentOnId]=0",
-                 objectIDs[1],
-                 "&page[size]=250&page[number]=1&sort=lastModifiedDate,documentId&api_key=",
-                 api_key))
-
-comments <- fromJSON(rawToChar(comments$content))
-
-view(comments$data)
-```
-
-#Some Useful Functions
-
-We can only retrieve 250 (so why are my `comments` dfs showing only 25 elements each?) comments at a time. So we build a function that takes a numeric argument for `page[number]` argument in the API call and returns the data component:
+We will also want to know how many comments we can expect. To do this, we request a page of comments on our proposed rule using its objectID. Note that the URL in this request only returns (in `$data`) the first page of comments meeting the requested criteria (pages default to 25 comments long), but since we are only interested in the `totalElements` field (in `meta`), this does not concern us for now.
 
 ```{r}
-
-# this function takes page number "page", an objectID, and a timestamp "last_mod" and returns the first 250 comments on object ID submitted at or after the timestamp
-
-retrieve_comment_ids <- function(page, objectID, last_mod = ""){
-  
-  # if last_mod is blank, return the first 250 (chronologically) comment IDs
-  if_else(last_mod == "",
+getCommentCount <- function(objectID){
   url <- paste0("https://api.regulations.gov/v4/comments?filter[commentOnId]=",
-                objectID, "&page[size]=250&page[number]=",
-                page,
-                "&sort=lastModifiedDate,documentId&api_key=",
-                api_key),
+                objectID, "&api_key=", api_key)
   
-  # otherwise, return the first 250 on or after the timestamp
-  url <- paste0("https://api.regulations.gov/v4/comments?filter[commentOnId]=", objectID, "&",
-                "filter[lastModifiedDate][ge]=",
-                last_mod,
-                "page[size]=250&page[number]=",
-                page,
-                "&sort=lastModifiedDate,documentId&api_key=", api_key)
-  )
-  comments <- GET(url)
-  comments <- fromJSON(rawToChar(comments$content))
-
-comments$data
+  raw_comments <- get_or_wait(url)
+  comments <- fromJSON(rawToChar(raw_comments$content))
+  return(comments$meta$totalElements)
 }
 
-# this does the same as the above, but without bothering with last_mod
+# get the comment count (will be useful below)
+commentCount <- getCommentCount(oID)
+if(demo){ commentCount }
+```
 
-retrieve_comment_ids <- function(page, objectID, last_mod = NA){
- 
+## Exploring a single comment
+
+When we get a page of comments with an API call like in `getAPageOfComments()` above, we only get limited information about each comment. To get more details, including the content of the comment and its attachments, we need to request the data at each of the urls in `$data$links$self` in turn. For a page of 25 comments, `$data$links$self` will be a page of 25 links, each of which we can pass to the `getSingleCommentDetails()` function below.
+
+```{r}
+getSingleCommentDetails <- function(link){
+  raw_comment <- get_or_wait(paste0(link, "?include=attachments&api_key=", api_key))
+  comment <- fromJSON(rawToChar(raw_comment$content))
+}
+
+# if demo = TRUE, you can explore the structure of a single comment if you like
+if(demo){
   url <- paste0("https://api.regulations.gov/v4/comments?filter[commentOnId]=",
-                objectID, "&page[size]=250&page[number]=",
-                page,
-                "&sort=lastModifiedDate,documentId&api_key=", api_key)
-  
-  comments <- GET(url)
-  comments <- fromJSON(rawToChar(comments$content))
-
-comments$data
+                oID, "&api_key=", api_key)
+  raw_comments <- get_or_wait(url)
+  comments <- fromJSON(rawToChar(raw_comments$content))
+  single_comment <- getSingleCommentDetails(comments$data$links$self[1])
+  single_comment
 }
 ```
 
-Then we can use `map_df` to go through 250 (25?) comments at a time. The total number of comments is available in the `$meta$totalElements`. In addition to the limitation of only getting 250 comments at a time, the API also has a rate limit of 1000 requests per hour. Finally, there is a limit of retrieving only 5000 comments by paging through. All of this requires another function.
+# Downloading attachments
 
-[https://api.regulations.gov/v4/comments?filter[commentOnId]=09000064846eebaf&filter[lastModifiedDate][ge]=2020-08-10](https://api.regulations.gov/v4/comments?filter%5BcommentOnId%5D=09000064846eebaf&filter%5BlastModifiedDate%5D%5Bge%5D=2020-08-10){.uri} 11:58:52&page[size]=250&page[number]=N&sort=lastModifiedDate,documentId&api_key=DEMO_KEY
+Each comment's details provide link to the attachments for download. Often, there is just a single attachment: the text of the comment; the comment itself will either duplicate this attachment of say something like "see attached." Nevertheless, when we save and return the full text of a comment, we want both the comment body and the content of any attachments. This provides that. All attachments, as well as fullText.txt, are both saved in the directory `attachments/id` where ID is the more human readable ID (the docket ID suffixed with a hyphen and a few numerals). The function also returns the full text, which we will place in a data frame for future analysis.
+
+Most of the body of this function is devoted to handling various rare edge cases:
+
+1)  restricted (often copyrighted) attachments
+
+2)  non-pdf files
+
+3)  files are occasionally available in multiple formats, which may or may not include our chosen format
+
+4)  we may also occasionally encounter items that are not attachments, but I have not encountered this.
 
 ```{r}
-retrieve_all_comment_ids <- function(n){
-  # retrieve number of comments
-  df <- GET(paste0("https://api.regulations.gov/v4/comments",
-                   "?filter[commentOnId]=090000648320bc9e&api_key=", api_key))
-  df2 <- fromJSON(rawToChar(df$content))
-  n_comments <- df2$meta$totalElements
-  n_pages <- as.integer(n_comments/250)
+downloadFilesAndGetText <- function(comment, destdir = "attachments"){
   
-  # retrieve comments until we have 5000
-  if_else(n_comments <= 5000,
-          retrieve_comment_ids(1:n_pages, objectIDs[1]),
-          
+  N <- length(comment$included$id)
+  
+  commentDir <- comment$data$id
+  
+  if (!dir.exists(paste(destdir, commentDir, sep = "/"))) {
+    dir.create(paste(destdir, commentDir, sep = "/"))
+  }
+  
+  # add the text from the comment itself to the fullText string
+  fullText <- comment$data$attributes$comment
+  
+  for (i in 1:N){
     
-  )
+    if (is.na(comment$included$attributes$fileFormats[1])) {
+      cat(paste("WARNING: attachment", i, "could not be downloaded from comment ",
+                  comment$data$id, ", perhaps because of restrictReasonType: ", 
+                  comment$included$attributes$restrictReasonType, "\n"),
+          file="log.txt", append =TRUE)
+      fullText <- paste(fullText, "\n\n---\n", "Attachment", i, "title:\n", comment$included$attributes$title[i], 
+                        "\n---\n", "RESTRICTED (",comment$included$attributes$restrictReasonType, ")", sep = " ")
+      next
+    }
+    
+    itemFormat <- comment[["included"]][["attributes"]][["fileFormats"]][[i]][[2]]
+    
+    # if the item can be downloaded in several formats, set to PDF
+    if (length(itemFormat) > 1) {
+      if ("pdf" %in% itemFormat) {
+        fi <- match("pdf", itemFormat)
+        itemFormat <- "pdf"
+      } else {
+        cat(paste("multiple formats, but none PDF; comment:", comment$data$id, "attachment: ", i, "\n"), 
+            file="log.txt", append =TRUE)
+        fi <- 1
+      }
+      itemFormat <- comment[["included"]][["attributes"]][["fileFormats"]][[i]][[2]][[fi]]
+    } else {fi <- 1}
+    
+    
+    
+    # Warn the user if the file is not marked as an attachment or is not a pdf
+    if (comment$included$type[i] != "attachments") {
+      cat(paste0("WARNING, item ", i, "'s type in comment ", comment$data$id,
+                   " is not 'attachments' but", comment$included$type, "\n"), 
+          file="log.txt", append =TRUE)
+    }
+    if (itemFormat != "pdf") {
+      cat(paste0("WARNING, item ", i, "'s format in comment ", comment$data$id,
+                   " is not 'pdf' but ", itemFormat, "\n"), file="log.txt", append =TRUE)
+      fullText <- paste(fullText, "\n\n---\n", "Attachment", i, "title:\n", comment$included$attributes$title[i],
+                        "\n---\n\n", "UNPARSED ", itemFormat, sep = " ")
+      next
+    }
+    
+    # target the directory, filename, and extension
+    filename <- paste0(comment$included$attributes$title[i], ".", itemFormat)
+    destpath <- paste(destdir, commentDir, filename, sep = "/")
+    
+    # print(paste0("found ", filename, " an ", comment$included$type[i], " with format ",
+    # itemFormat))
+    
+    # download the file to the targeted path
+    download.file(comment$included$attributes$fileFormats[[i]]$fileUrl[fi], 
+                  destfile = destpath, 
+                  mode = "wb")
+    
+    # grab the text from the dest path and store it locally
+
+    attachmentText <- paste(pdf_text(destpath), collapse = "", sep = "/n")
+    
+    fullText <- paste(fullText, "\n\n---\n", "Attachment", i, "title:\n",
+                      comment$included$attributes$title[i], "\n---\n\n", attachmentText, sep = " ")
+
+    
+  }
+  # TODO: combine all downloaded files into one big file - but idk if that's needed rn
+  textFName <- paste(destdir, commentDir, "fullText.txt", sep = "/")
+  cat(fullText, file = textFName, append = FALSE)
+  
+  return(fullText)
+} #destdir should be a directory - pulls filename from attachment data
+
+```
+
+# Putting it together
+
+## Helper functions
+
+Before we finally run the request, a few helper functions help us log which comments have been downloaded and put all the comments together into a data frame.
+
+```{r}
+# nullToNA replaces NULL elements of a list with NA
+nullToNA <- function(x) {
+  x[sapply(x, is.null)] <- NA
+  return(x)
 }
 
-pages <- comments
-
-argList <- list(x = 1:37, y = objectIDs[1])
-crossArg <- cross_df(argList)
-
-# comment_ids <- map2_df(crossArg$x, crossArg$y,
-#                        retrieve_comment_ids)
-
+# slug takes a function in the form of EPA-HQ-OA-####-####-####(#) and extracts everything after the final hyphen
+slug <- function(id) {
+  return(word(id, 6, sep = "-"))
+}
 ```
 
-#Exploring a single comment
+## Page by page and batch by batch
 
-Let's get a single comment:
+The below uses nested loops [ while (not enough comments) {for (each page in a batch) {for {each comment on a page}}} ] to add comments one by one to a data frame that carries their `attributes` and a list that carries their ID and text. Then, it zips the data fram and list together.
 
 ```{r}
-comments$data
-GET(paste0(comments$data$links$self[1], "?api_key=", api_key))
 
-df <- GET(paste0("https://api.regulations.gov/v4/comments/EPA-HQ-OA-2018-0259-6884?include=attachments&api_key=", api_key))
+# getCommentDf <- function(oID) {
 
-single_comment <- fromJSON(rawToChar(df$content))
+  startTime <- lubridate::now()
 
-# single_comment$included$attributes$fileFormats$attachment <-- NA
-# 
-# attachment <- GET(paste0(single_comment$included$links, "?api_key=", api_key))
-# 
-# comments <- fromJSON(rawToChar(attachment$content))
+  pageLen <- 6 # will be 250 once tested
+  pagesPerBatch <- 20 # will be 5000/250 = 20 once tested
+  commentCount <- getCommentCount(oID)
+  last_mod <- ""
+  batchN <- 1
+  
+  #setting comment count lower for testing
+  commentCount <- 900
+  textList <- rep("ID TBD", commentCount)
+  
+  commentDF <- as.data.frame(list(no = "data"))
+  commentsAdded <- 0
+  
+  cat(paste(startTime, ": Pulling", commentCount, "comments in batches of", pagesPerBatch, "pages of",
+            pageLen, "comments each"), file = "log.txt", append = FALSE)
+  
+  stop = FALSE
+  while (!stop) {
+    
+    for (pageN in 1:pagesPerBatch) {
+      
+      # don't bother adding more comments if we have all the comments we need
+      # this will usually be the stop condition when collecting a full set of comments
+      if(nrow(commentDF) == commentCount) { 
+        stop = TRUE
+        break 
+      }
+      
+      # pull a page of comments
+      cat(paste("\npulling page", pageN, "of batch", batchN, "\n"), 
+          file="log.txt", append =TRUE)
+      pageOfComments <- getAPageOfComments(pageN, oID, last_mod, pageLen)
+      
+      # for the first page on every batch but the first, find the comment where we left off
+      if ((pageN == 1) & (textList[1] != "ID TBD")) { 
+        start <- match(last_name, pageOfComments$data$id) + 1
+        cat(paste0("starting batch ", batchN," at ", start, "th comment\n"), file="log.txt", append =TRUE)
+      } else {
+        start <- 1
+      }
+      
+      
+      # get every comment in the page, except the ones before the last comment we grabbed
+      for (i in start:pageLen) {
+        
+        commentsAdded <- commentsAdded + 1
+        
+        # stop comment collection early if we've explicitly asked for fewer comments than exist
+        if (commentsAdded > commentCount) {
+          cat(paste0("WARNING: it looks like there's more comments than commentCount (",
+                     commentCount, ")! Terminating..."), file = "log.txt", append = TRUE)
+          stop = TRUE
+          break
+        }
+        
+        url <- paste0(pageOfComments$data$links$self[i])
+        comment <- getSingleCommentDetails(url)
+        
+        # log that the comment has been pulled
+        cat(paste0(commentsAdded, ":-", slug(comment$data$id), "..."), file="log.txt", append = TRUE)
+        
+        # put the comment's details into a data frame
+        comment$data$attributes["displayProperties"] <- NA
+        attsList <- nullToNA(comment$data$attributes)
+        if (i == 1 & pageN == 1) {
+          commentDF <- as.data.frame(attsList)
+        } else { 
+          commentDF <- rbind.data.frame(commentDF, as.data.frame(attsList))
+        }
+
+        names(textList)[commentsAdded] <- comment$data$id
+        textList[commentsAdded] <- downloadFilesAndGetText(comment)
+        
+        #delete directory to save drive space during testing
+        deldir <- paste("attachments", comment$data$id, sep = "/")
+        unlink(deldir, recursive = TRUE)
+      
+      }
+  
+    }
+    # The last_mod given is formatted yyyy-mm-ddThh:mm:ssZ (in UTC) but get() needs yyyy-mm-dd hh:mm:ss (in Eastern Time) 
+    last_mod_UTC <- as.POSIXct(sub("T", " ", pageOfComments$data$attributes$lastModifiedDate[pageLen]), tz = "UTC")
+    last_mod <- sub(" E*T", "", lubridate::with_tz(last_mod_UTC, "America/New_York"))
+    last_name <- comment$data$id
+    batchN <- batchN + 1
+  }
+  
+  c <- cbind(names(textList), textList, commentDF)
+  colnames(c)[1] <- "ID"
+  colnames(c)[2] <- "full text"
+  
+  endTime <- lubridate::now()
+  runTime <- endTime - startTime
+  timePerComment <- runTime / commentCount
+  cat(paste("Run time of", runTime, "or", timePerComment, "per comment"))
+  
 ```
-
-To get the link to an attachment file, you have to go deep into the JSON structure:
-
-```{r}
-download.file(single_comment$included$attributes$fileFormats[[1]]$fileUrl, destfile = "attachments/test.pdf", mode = "wb")
-```
-
-```{r}
-text <- pdf_text("attachments/test.pdf")
-```
-
-# Questions on design
-
--   Can there be more than one attachment?
--   BM: YES, seems to be rare though. Example comment [here](https://www.regulations.gov/comment/EPA-HQ-OAR-2020-0532-0066) (note this is not on the Transparency rule we are concerned with, but could be useful for troubleshooting)
-
--   Are all attachments OCR'd?
--   BM: Not necessarily. Even if all PDFs are OCR'd, there may be other visual media. From the FAQs: "You can attach up to 20 files, but each file cannot exceed 10MB. Valid file types include: .bmp, .docx, .gif, .jpeg, .jpg, .pdf, .png, .pptx, .rtf, .sgml, .tif, .tiff, .txt, .wpd, .xlsx, .xml." For now, it may be best to assume all attachments are OCR'd PDFs, get alerts when they're not (PDFs lacking OCR, and other filetypes?) and handle those in the future
-
--   Do we need the `last_mod` input to these functions?
-
-# Questions on specs
--   Discuss how these files will be coded: should we concatenate all text in a given comment?
--   Will we want to de-duplicate mass-mail campaigns (looks like agencies already do this somewhat)?
--   Assume we'll want to retain which proposal comment is on. What other metadata matter (there's lots, but thinking about filtering it to a manageable level)
-    - Date
-    - Submitter
-    - Somehow determine if supporting or opposing proposed rule? That's a stretch goal for my PAship, but we can talk about how to do that
- 
-
-# Minimum viable product to-dos
-
--   Consider contacting data.gov helpdesk to increase rate limit to 2000 requests/hr. Other limits may be similarly flexible
--   Add exception handling to know how many non-OCR'd PDFs, non-PDF attachments, and multiple attachments we're getting
--   Briefly familiarize yourself with the following libraries:
--   pdftools
--   jsonlite
--   httr
--   tidyverse
-
-# Modularity & quality of life to-dos
-
--   figure out why we're pulling 25 comments at a time rather than 250 (is it just a page size limit?)
--   add system for changing docket ID
--   add system to recognize attachments other than OCR'd PDFs and handle them separately
--   think about de-duplicating data (it [looks like](https://www.regulations.gov/faq?anchor=find) the agencies may already do this to some extent - the posted comments are a small subset of the received comments, including filtering out near-duplicates from mass-mail campaigns)
--   When we search/code these, will we be doing fuzzy matcing? 

@@ -44,4 +44,6 @@ vignettes/*.pdf
 
 # logs and some deprecated code I've been playing around with
 log.txt
+out.txt
 /archived_code
+*.RData

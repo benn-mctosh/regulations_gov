@@ -8,10 +8,10 @@ output: html_document
 ```{r setup, include=FALSE}
 knitr::opts_chunk$set(echo = TRUE)
 
-demo = TRUE #Turn off to stop the demo calls beneath several of the functions below
+demo = FALSE #Turn off to stop the demo calls beneath several of the functions below
 ```
 
-# Background and Prerequesites
+# Background and Prerequisites
 
 For a research project, we need to scrape comments submitted to the Environmental Protection Agency on a proposed rule. The comments are posted on [regulations.gov](https://www.regulations.gov/document/EPA-HQ-OA-2018-0259-9322/comment).
 
@@ -21,7 +21,9 @@ We would like this scraping to produce:
 
 2)  A directory containing PDFs (or similar NVivo-legible document) of every comment, in subdirectories named by comment ID for future search/analysis. The documents in this directory should include both the attachments to the comments themselves, as well as a holistic document, with a table of contents, that combines the comment and all attachments
 
-Documentation for the regulations.gov is available [here](https://open.gsa.gov/api/regulationsgov/). An API key can be requested [here](https://api.data.gov/signup/). The below code assumes you have saved your API key as "regulations_gov_key" in your `renviron`. We also make use of a few libraries
+Documentation for the regulations.gov API is available [here](https://open.gsa.gov/api/regulationsgov/). An API key can be requested [here](https://api.data.gov/signup/).
+
+The below code assumes you have saved your API key as "regulations_gov_key" in your `renviron`. We also make use of a few libraries:
 
 ```{r}
 library(jsonlite)
@@ -39,7 +41,9 @@ api_key <- Sys.getenv("regulations_gov_key")
 
 ## Rate Limits
 
-The GSA imposes a [rate limit](https://api.data.gov/docs/rate-limits/) of 1000 requests per hour (on a rolling basis) for the api keys it distributes. To avoid running afoul of these, we use a wrapper for the GET() function that simply pauses execution when we approach the limits. This is not the most efficient solution, since the rate limits function on a rolling basis (so if we made our first request at 10:15 and our 1000th at 10:25 we could start making new requests at 11:15, not 11:25), but it will serve for the scale at which we are working
+The GSA imposes a [rate limit](https://api.data.gov/docs/rate-limits/) of 1000 requests per hour (on a rolling basis) for the api keys it distributes. To avoid running afoul of these, we use a wrapper for the GET() function that simply pauses execution when we approach the limits. This is not the most efficient solution, since the rate limits function on a rolling basis (so if we made our first request at 10:15 and our 1000th at 10:25 we could start making new requests at 11:15, not 11:25), but it will serve for the scale at which we are working.
+
+NOTE: Since at current speeds below code takes \~8 minutes to make 1k requests, one kludge would be sleeping for 55 minutes rather than 60, which would save \~5min per thousand comments (a little under 2 hours for the \~23k comments on the 2020 supplement)
 
 ```{r}
 get_or_wait <- function(url) {
@@ -53,18 +57,21 @@ get_or_wait <- function(url) {
   # If remaining requests are low, sleep for an hour and then resume execution, reporting the action in "log.txt"
   if (remaining < 5) {
     pauseTime <- lubridate::now()
-    cat(paste0("\n APPROACHING RATE LIMIT: pausing until 1hr from ", pauseTime, "\n",
+    cat(paste0("\n APPROACHING RATE LIMIT: pausing until 55min from ", pauseTime, "\n",
                "requests remaining currently: ", remaining, "\n"),
         file = "log.txt", append = TRUE)
-    Sys.sleep(3600)
+    Sys.sleep(3300)
     restartTime <- lubridate::now()
     r <- GET(url)
     remaining <- as.integer(r$headers$`x-ratelimit-remaining`)
-    cat(paste0("Restarting at ", restartTime, "; requests remaining currently: ", remaining, "\n"))
+    cat(paste0("Restarting at ", restartTime, "; requests remaining currently: ", remaining, "\n"), 
+        file = "log.txt", append = TRUE)
   }
   return(r)
 }
 ```
+
+Note the messages saved to `log.txt`. These (and others below) are the ones I have found most useful in debugging; running this code, especially the download function below, generates many other notes and warnings to `stdout` that I have found less useful, so tend to pipe to pipe to a separate file such as `out.txt`. To facilitate this, both `log.txt` and `out.txt` are currently listed in `.gitignore`
 
 ## Page limits
 
@@ -76,7 +83,7 @@ In addition to the rate limits mentioned above, the GSA places a few other limit
 
 This effectively means that no search can return more than 5,000 comments. For dockets with \~9k and \~22k comments, this is an issue! The GSA [currently recommends](https://open.gsa.gov/api/regulationsgov/#there-are-strict-pagination-limits-in-v4-how-do-i-retrieve-all-comments-in-a-docket-posted-on-the-same-day-if-the-number-of-comments-is-greater-than-2500) (in beta versions of v4 of the API) that you get around these issues by sorting your search results by `lastModifiedDate`, and then running several searches in series, each of which filters out items with a `lastModifiedDate` before the most recent result in your previous search. We will need to run 2 different searches for our 9k comments, and 5 for our 22k comments
 
-The function below will assist us in paging through these searches. It gives us a page of comments, sorted by `lastModifiedDate`, and with comments with a `lastModifiedDate` before `last_mod` filtered out if needed. pSize defaults to the max, 250, but may be set as low as 5 (usually for testing purposes). Note that getting a page of comments on a given document requires that document's objectID, which we will find below.
+The function below will assist us in paging through these searches. It gives us a page of comments, sorted by `lastModifiedDate`, from a search in which comments with a `lastModifiedDate` before `last_mod` filtered out if needed. Page size (`pSize`) defaults to the max, 250, but may be set as low as 5 (usually for testing purposes). Note that getting a page of comments on a given document requires that document's objectID, which we will find below.
 
 ```{r}
 getAPageOfComments <- function(page, objectID, last_mod = "", pSize = 250){
@@ -101,7 +108,7 @@ getAPageOfComments <- function(page, objectID, last_mod = "", pSize = 250){
 
 ## What are our objectIDs?
 
-Every proposed rule, promulgated rule, comment, or supporting document has a unique `objectID`, a 16-character alphanumeric (since the only letters I've seen are a-f, presumably these are hexidecimal numbers somewhere in GSA's back-end). Within a given rulemaking process or "docket," they also share a `docketID`, which is more human-readable.
+Every proposed rule, promulgated rule, comment, or supporting document has a unique `objectID`, a 16-character alphanumeric (since the only letters I've seen are a-f, presumably these are hexidecimal numbers somewhere in GSA's back-end). Within a given rule-making process or "docket," they also share a `docketID`, which is more human-readable. The `docketID`, suffixed by a hyphen and a few numerals, is also listed in each rule, comment, or supporting document as its `id`. So for instance, within the docket with `docketID` "EPA-HQ-OA-2018-0259", we may see a proposed rule with `id` "EPA-HQ-OA-2018-0259-0001", and a comment on said rule with `id` "EPA-HQ-OA-2018-0259-5041", each with a unique hexadecimal `objectID`
 
 We use the `httr` package to retrieve summary information for the docket ID. Here, we're using the docket ID "EPA-HQ-OA-2018-0259" - your docket ID can be discovered by searching for your rule/proposal on [regulations.gov](regulations.gov). Additionally filtering for "Proposed Rule" during the `GET()` call allows us to pull all four documents of `documentType` "Proposed Rule" in one `GET()` call (rather than paging through several pages of documents, mostly of `documentType` "Supporting & Related Material")
 
@@ -131,7 +138,7 @@ We can see that the docket includes four documents of documentType "Proposed Rul
 
 The deadline extensions do not appear to have any associated comments, and have subtype "Extension of Comment Period," which we can use to filter them out.
 
-We can see from df2 that the objectId of the 2018 proposed rule is "090000648320bc9e", and for the 2020 supplement is "09000064846eebaf". These will allow retrieval of comments through the comments endpoint of the API
+We can see from df2 that the `objectId` of the 2018 proposed rule is "090000648320bc9e", and for the 2020 supplement is "09000064846eebaf". These will allow retrieval of comments through the comments endpoint of the API
 
 For now, we will focus on the 2018 proposed rule:
 
@@ -194,12 +201,15 @@ Most of the body of this function is devoted to handling various rare edge cases
 4)  we may also occasionally encounter items that are not attachments, but I have not encountered this.
 
 ```{r}
+getTestComment <- function(id) {
+  url <- paste0("https://api.regulations.gov/v4/comments/", id)
+  return(getSingleCommentDetails(url))
+}
+
 downloadFilesAndGetText <- function(comment, destdir = "attachments"){
-  
-  N <- length(comment$included$id)
-  
+
+  # create the directory in which to download attachments
   commentDir <- comment$data$id
-  
   if (!dir.exists(paste(destdir, commentDir, sep = "/"))) {
     dir.create(paste(destdir, commentDir, sep = "/"))
   }
@@ -207,78 +217,119 @@ downloadFilesAndGetText <- function(comment, destdir = "attachments"){
   # add the text from the comment itself to the fullText string
   fullText <- comment$data$attributes$comment
   
-  for (i in 1:N){
+  # if there are attachments, add them to the directory and to the fullText string
+  if (!is.null(comment$included)) {
+
+  
+    # check the number of attachments
+    N <- length(comment$included$id)
     
-    if (is.na(comment$included$attributes$fileFormats[1])) {
-      cat(paste("WARNING: attachment", i, "could not be downloaded from comment ",
+    
+    # check which comments are restricted
+    restricted <- !is.na(comment$included$attributes$restrictReasonType)
+    
+    for (i in 1:N){
+      # should check if comment is restricted and skip download if so
+      # currently breaks ONLY when there are multiple documents
+      # simply changing to is.null doesn't work
+      
+      # tests if the file is restricted. 
+      # Unfortunately this works differently for single-attachment and multi-attachment comments
+      if (restricted[i]) {
+        cat(paste("WARNING: attachment", i, "could not be downloaded from comment ",
                   comment$data$id, ", perhaps because of restrictReasonType: ", 
-                  comment$included$attributes$restrictReasonType, "\n"),
-          file="log.txt", append =TRUE)
-      fullText <- paste(fullText, "\n\n---\n", "Attachment", i, "title:\n", comment$included$attributes$title[i], 
-                        "\n---\n", "RESTRICTED (",comment$included$attributes$restrictReasonType, ")", sep = " ")
-      next
-    }
-    
-    itemFormat <- comment[["included"]][["attributes"]][["fileFormats"]][[i]][[2]]
-    
-    # if the item can be downloaded in several formats, set to PDF
-    if (length(itemFormat) > 1) {
-      if ("pdf" %in% itemFormat) {
-        fi <- match("pdf", itemFormat)
-        itemFormat <- "pdf"
-      } else {
-        cat(paste("multiple formats, but none PDF; comment:", comment$data$id, "attachment: ", i, "\n"), 
+                  comment$included$attributes$restrictReasonType[i], "\n"),
             file="log.txt", append =TRUE)
-        fi <- 1
+        fullText <- paste(fullText, "\n\n---\n", "Attachment", i, "title:\n", comment$included$attributes$title[i], 
+                          "\n---\n", "RESTRICTED (",comment$included$attributes$restrictReasonType[i], ")", sep = " ")
+        next
       }
-      itemFormat <- comment[["included"]][["attributes"]][["fileFormats"]][[i]][[2]][[fi]]
-    } else {fi <- 1}
-    
-    
-    
-    # Warn the user if the file is not marked as an attachment or is not a pdf
-    if (comment$included$type[i] != "attachments") {
-      cat(paste0("WARNING, item ", i, "'s type in comment ", comment$data$id,
+      
+      itemFormat <- comment[["included"]][["attributes"]][["fileFormats"]][[i]][[2]]
+      
+      # if the item can be downloaded in several formats, set to PDF if possible
+      if (length(itemFormat) > 1) {
+        if ("pdf" %in% itemFormat) {
+          fi <- match("pdf", itemFormat)
+          itemFormat <- "pdf"
+        } else {
+          cat(paste("multiple formats, but none PDF; comment:", comment$data$id, "attachment: ", i, "\n"), 
+              file="log.txt", append =TRUE)
+          fi <- 1
+        }
+        itemFormat <- comment[["included"]][["attributes"]][["fileFormats"]][[i]][[2]][[fi]]
+      } else {fi <- 1}
+      
+      
+      
+      # Warn the user if the file is not marked as an attachment or is not a pdf
+      if (comment$included$type[i] != "attachments") {
+        cat(paste0("WARNING, item ", i, "'s type in comment ", comment$data$id,
                    " is not 'attachments' but", comment$included$type, "\n"), 
-          file="log.txt", append =TRUE)
-    }
-    if (itemFormat != "pdf") {
-      cat(paste0("WARNING, item ", i, "'s format in comment ", comment$data$id,
+            file="log.txt", append =TRUE)
+      }
+      
+      # target the directory, filename, and extension
+      filename <- paste0(comment$included$attributes$title[i], ".", itemFormat)
+      destpath <- paste(destdir, commentDir, filename, sep = "/")
+      
+      # print(paste0("found ", filename, " an ", comment$included$type[i], " with format ",
+      # itemFormat))
+      
+      # download the file to the targeted path
+      download.file(comment$included$attributes$fileFormats[[i]]$fileUrl[fi], 
+                    destfile = destpath, 
+                    mode = "wb")
+      
+      # Warn the user if the file is not a PDF (and add placeholder to fullText)
+      if (itemFormat != "pdf") {
+        cat(paste0("WARNING, item ", i, "'s format in comment ", comment$data$id,
                    " is not 'pdf' but ", itemFormat, "\n"), file="log.txt", append =TRUE)
-      fullText <- paste(fullText, "\n\n---\n", "Attachment", i, "title:\n", comment$included$attributes$title[i],
-                        "\n---\n\n", "UNPARSED ", itemFormat, sep = " ")
-      next
+        fullText <- paste(fullText, "\n\n---\n", "Attachment", i, "title:\n", comment$included$attributes$title[i],
+                          "\n---\n\n", "UNPARSED ", itemFormat, sep = " ")
+      } # Otherwise, download the PDF and grab the text 
+      else {
+        attachmentText <- paste(pdf_text(destpath), collapse = "", sep = "/n")
+        
+        fullText <- paste(fullText, "\n\n---\n", "Attachment", i, "title:\n",
+                          comment$included$attributes$title[i], "\n---\n\n", 
+                          attachmentText, sep = " ")
+        
+      }
+      
     }
-    
-    # target the directory, filename, and extension
-    filename <- paste0(comment$included$attributes$title[i], ".", itemFormat)
-    destpath <- paste(destdir, commentDir, filename, sep = "/")
-    
-    # print(paste0("found ", filename, " an ", comment$included$type[i], " with format ",
-    # itemFormat))
-    
-    # download the file to the targeted path
-    download.file(comment$included$attributes$fileFormats[[i]]$fileUrl[fi], 
-                  destfile = destpath, 
-                  mode = "wb")
-    
-    # grab the text from the dest path and store it locally
-
-    attachmentText <- paste(pdf_text(destpath), collapse = "", sep = "/n")
-    
-    fullText <- paste(fullText, "\n\n---\n", "Attachment", i, "title:\n",
-                      comment$included$attributes$title[i], "\n---\n\n", attachmentText, sep = " ")
-
-    
+    # TODO: combine all downloaded files into one big file - but idk if that's needed rn
+    # TODO: simply write the new text to a file progressively (r/t storing as a string)
+    #       (fullText can be a path if you want to do searching later)
+    # TODO: fix so docs are downloaded/appended to .txt in order by the $docOrder list in $included$attributes
   }
-  # TODO: combine all downloaded files into one big file - but idk if that's needed rn
+
   textFName <- paste(destdir, commentDir, "fullText.txt", sep = "/")
   cat(fullText, file = textFName, append = FALSE)
   
   return(fullText)
+} 
+
+testDownload <- function(id) {
+  comment <- getTestComment(id)
+  downloadFilesAndGetText(comment)
+  return(comment)
 } #destdir should be a directory - pulls filename from attachment data
 
+
+if (demo) {
+  c1037 <- testDownload("EPA-HQ-OA-2018-0259-1037") # multiple attachments, 1 restricted
+  c0066 <- testDownload("EPA-HQ-OAR-2020-0532-0066") # multiple attachments, none restricted; #13 needs OCR
+  c0445 <- testDownload("EPA-HQ-OA-2018-0259-0445") # single, restricted (copyrighted) attachment
+  c0684 <- testDownload("EPA-HQ-OA-2018-0259-0684") # single, restricted (other) attachment
+  c0671 <- testDownload("EPA-HQ-OA-2018-0259-0671") # attachment is docx, not pdf
+  c1388 <- testDownload("EPA-HQ-OA-2018-0259-1388") # no attachment (comment body only)
+}
+
+
 ```
+
+The `if` statement above pulls some comments I have found useful for testing various edge cases
 
 # Putting it together
 
@@ -301,22 +352,30 @@ slug <- function(id) {
 
 ## Page by page and batch by batch
 
-The below uses nested loops [ while (not enough comments) {for (each page in a batch) {for {each comment on a page}}} ] to add comments one by one to a data frame that carries their `attributes` and a list that carries their ID and text. Then, it zips the data fram and list together.
+The below uses nested loops in the form:
 
-```{r}
+`while (not enough comments) {`
+
+`for (each page in a batch) {`
+
+`for (each comment on a page) {do stuff}}}}`
+
+to add comments one by one to a data frame that carries their `attributes` and a list that carries their ID and text. Then, it zips the data frame and list together using cbind.
+
+```{r, echo = FALSE}
 
 # getCommentDf <- function(oID) {
 
   startTime <- lubridate::now()
 
-  pageLen <- 6 # will be 250 once tested
+  pageLen <- 250 # will be 250 once tested
   pagesPerBatch <- 20 # will be 5000/250 = 20 once tested
   commentCount <- getCommentCount(oID)
   last_mod <- ""
   batchN <- 1
   
   #setting comment count lower for testing
-  commentCount <- 900
+  # commentCount <- 900
   textList <- rep("ID TBD", commentCount)
   
   commentDF <- as.data.frame(list(no = "data"))
@@ -396,13 +455,36 @@ The below uses nested loops [ while (not enough comments) {for (each page in a b
     batchN <- batchN + 1
   }
   
+  # zip the comments' attributes together with their names and text
   c <- cbind(names(textList), textList, commentDF)
   colnames(c)[1] <- "ID"
   colnames(c)[2] <- "full text"
   
+  save(c, fname = "test9k.Rdata")
+  
+  # log the total time and time per comment
   endTime <- lubridate::now()
   runTime <- endTime - startTime
   timePerComment <- runTime / commentCount
   cat(paste("Run time of", runTime, "or", timePerComment, "per comment"))
   
 ```
+
+# Next Steps
+
+3)  Test rate limit handling and run through while deleting files to find edge cases
+4)  OCR with PDFtools?
+5)  Make unified PDF
+6)  Statistical characterization:
+
+<!-- -->
+
+a)  How many non-unique comments
+b)  Distribution of n_attachments
+c)  Distribution of time submitted
+d)  Any of these interact with institutional/individual/what was the other one categories?
+
+<!-- -->
+
+7)  Sort functions
+8)  Search functions

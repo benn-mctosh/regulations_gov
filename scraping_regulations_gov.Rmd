@@ -43,24 +43,43 @@ api_key <- Sys.getenv("regulations_gov_key")
 
 The GSA imposes a [rate limit](https://api.data.gov/docs/rate-limits/) of 1000 requests per hour (on a rolling basis) for the api keys it distributes. To avoid running afoul of these, we use a wrapper for the GET() function that simply pauses execution when we approach the limits. This is not the most efficient solution, since the rate limits function on a rolling basis (so if we made our first request at 10:15 and our 1000th at 10:25 we could start making new requests at 11:15, not 11:25), but it will serve for the scale at which we are working.
 
-NOTE: Since at current speeds below code takes \~8 minutes to make 1k requests, one kludge would be sleeping for 55 minutes rather than 60, which would save \~5min per thousand comments (a little under 2 hours for the \~23k comments on the 2020 supplement)
+NOTE: It seems like the rate limiting doesn't refresh as quickly as we might prefer, so we sleep for an extra 5 minutes
 
 ```{r}
 get_or_wait <- function(url) {
   
-  # GET the item from the URL given
-  r <- GET(url)
+  # GET the item from the URL given.
+  # Within a trycatch in case GET() returns an error
   
+  r <- NA
+  sleepTime <- 60 # if there's a connection issue, try again in a minute
+  while (is.na(r[1])) {
+  
+    r <- tryCatch(
+      {
+        r <- GET(url)
+      }, 
+      error=function(cond) {
+        message(paste("error in fetching url: ", url))
+        message(cond)
+        Sys.sleep(sleepTime)
+        return(NA)
+      }
+      
+      
+    )
+  }
+
   # Your remaining requests before the rate limit are stored in r$headers
   remaining <- as.integer(r$headers$`x-ratelimit-remaining`)
   
   # If remaining requests are low, sleep for an hour and then resume execution, reporting the action in "log.txt"
   if (remaining < 5) {
     pauseTime <- lubridate::now()
-    cat(paste0("\n APPROACHING RATE LIMIT: pausing until 55min from ", pauseTime, "\n",
+    cat(paste0("\n APPROACHING RATE LIMIT: pausing until 1hr 5min from ", pauseTime, "\n",
                "requests remaining currently: ", remaining, "\n"),
         file = "log.txt", append = TRUE)
-    Sys.sleep(3300)
+    Sys.sleep(3900)
     restartTime <- lubridate::now()
     r <- GET(url)
     remaining <- as.integer(r$headers$`x-ratelimit-remaining`)
@@ -167,10 +186,10 @@ if(demo){ commentCount }
 
 ## Exploring a single comment
 
-When we get a page of comments with an API call like in `getAPageOfComments()` above, we only get limited information about each comment. To get more details, including the content of the comment and its attachments, we need to request the data at each of the urls in `$data$links$self` in turn. For a page of 25 comments, `$data$links$self` will be a page of 25 links, each of which we can pass to the `getSingleCommentDetails()` function below.
+When we get a page of comments with an API call like in `getAPageOfComments()` above, we only get limited information about each comment. To get more details, including the content of the comment and its attachments, we need to request the data at each of the urls in `$data$links$self` in turn. For a page of 25 comments, `$data$links$self` will be a page of 25 links, each of which we can pass to the `getCommentByUrl()` function below.
 
 ```{r}
-getSingleCommentDetails <- function(link){
+getCommentByUrl <- function(link){
   raw_comment <- get_or_wait(paste0(link, "?include=attachments&api_key=", api_key))
   comment <- fromJSON(rawToChar(raw_comment$content))
 }
@@ -181,7 +200,7 @@ if(demo){
                 oID, "&api_key=", api_key)
   raw_comments <- get_or_wait(url)
   comments <- fromJSON(rawToChar(raw_comments$content))
-  single_comment <- getSingleCommentDetails(comments$data$links$self[1])
+  single_comment <- getCommentByUrl(comments$data$links$self[1])
   single_comment
 }
 ```
@@ -201,9 +220,9 @@ Most of the body of this function is devoted to handling various rare edge cases
 4)  we may also occasionally encounter items that are not attachments, but I have not encountered this.
 
 ```{r}
-getTestComment <- function(id) {
+getCommentById <- function(id) {
   url <- paste0("https://api.regulations.gov/v4/comments/", id)
-  return(getSingleCommentDetails(url))
+  return(getCommentByUrl(url))
 }
 
 downloadFilesAndGetText <- function(comment, destdir = "attachments"){
@@ -228,7 +247,10 @@ downloadFilesAndGetText <- function(comment, destdir = "attachments"){
     # check which comments are restricted
     restricted <- !is.na(comment$included$attributes$restrictReasonType)
     
-    for (i in 1:N){
+    for (j in 1:N){
+      # to download files in order:
+      i <- comment$included$attributes$docOrder[j]
+      
       # should check if comment is restricted and skip download if so
       # currently breaks ONLY when there are multiple documents
       # simply changing to is.null doesn't work
@@ -270,7 +292,11 @@ downloadFilesAndGetText <- function(comment, destdir = "attachments"){
       }
       
       # target the directory, filename, and extension
-      filename <- paste0(comment$included$attributes$title[i], ".", itemFormat)
+      # to avoid path errors, slashes ("/") in the title are replaced with hyphens ("-")
+      title <- paste0(sprintf("a%02d ", i),
+                      gsub("/", "-", comment$included$attributes$title[i]))
+      if (nchar(title) > 64) {title <- substr(title, 1, 64)}
+      filename <- paste0(title, ".", itemFormat)
       destpath <- paste(destdir, commentDir, filename, sep = "/")
       
       # print(paste0("found ", filename, " an ", comment$included$type[i], " with format ",
@@ -311,10 +337,10 @@ downloadFilesAndGetText <- function(comment, destdir = "attachments"){
 } 
 
 testDownload <- function(id) {
-  comment <- getTestComment(id)
+  comment <- getCommentById(id)
   downloadFilesAndGetText(comment)
   return(comment)
-} #destdir should be a directory - pulls filename from attachment data
+} 
 
 
 if (demo) {
@@ -324,6 +350,7 @@ if (demo) {
   c0684 <- testDownload("EPA-HQ-OA-2018-0259-0684") # single, restricted (other) attachment
   c0671 <- testDownload("EPA-HQ-OA-2018-0259-0671") # attachment is docx, not pdf
   c1388 <- testDownload("EPA-HQ-OA-2018-0259-1388") # no attachment (comment body only)
+  c9240 <- testDownload("EPA-HQ-OA-2018-0259-9240") # slashes in filename
 }
 
 
@@ -348,6 +375,13 @@ nullToNA <- function(x) {
 slug <- function(id) {
   return(word(id, 6, sep = "-"))
 }
+
+fixTimeString <- function(yyyymmddThhmmssZ) {
+  last_mod_UTC <- as.POSIXct(sub("T", " ", yyyymmddThhmmssZ), tz = "UTC")
+  last_mod <- sub(" E*T", "", lubridate::with_tz(last_mod_UTC,
+                                                 "America/New_York"))
+  return(last_mod)
+}
 ```
 
 ## Page by page and batch by batch
@@ -371,15 +405,30 @@ to add comments one by one to a data frame that carries their `attributes` and a
   pageLen <- 250 # will be 250 once tested
   pagesPerBatch <- 20 # will be 5000/250 = 20 once tested
   commentCount <- getCommentCount(oID)
-  last_mod <- ""
-  batchN <- 1
   
+  # initialize some tracking variables
+  last_mod <- ""
+  batchN <- 1  
+  commentsAdded <- 0
+
+  
+    # if previous download was interrupted partway through, can specify starting with a particular comment
+  # otherwise, this should be set to ""
+  startCommentID <- "EPA-HQ-OA-2018-0259-9299"
+  
+  # if you know how many comments deep the interrupt was, you can set that here so the script ends smoothly
+  if (startCommentID != "") {
+    url <- 
+    startComment <- getCommentById(startCommentID)
+    last_mod <- fixTimeString(startComment$data$attributes$modifyDate)
+    commentsAdded <- 5481 
+  }
+
   #setting comment count lower for testing
   # commentCount <- 900
   textList <- rep("ID TBD", commentCount)
   
   commentDF <- as.data.frame(list(no = "data"))
-  commentsAdded <- 0
   
   cat(paste(startTime, ": Pulling", commentCount, "comments in batches of", pagesPerBatch, "pages of",
             pageLen, "comments each"), file = "log.txt", append = FALSE)
@@ -424,7 +473,7 @@ to add comments one by one to a data frame that carries their `attributes` and a
         }
         
         url <- paste0(pageOfComments$data$links$self[i])
-        comment <- getSingleCommentDetails(url)
+        comment <- getCommentByUrl(url)
         
         # log that the comment has been pulled
         cat(paste0(commentsAdded, ":-", slug(comment$data$id), "..."), file="log.txt", append = TRUE)
@@ -449,8 +498,8 @@ to add comments one by one to a data frame that carries their `attributes` and a
   
     }
     # The last_mod given is formatted yyyy-mm-ddThh:mm:ssZ (in UTC) but get() needs yyyy-mm-dd hh:mm:ss (in Eastern Time) 
-    last_mod_UTC <- as.POSIXct(sub("T", " ", pageOfComments$data$attributes$lastModifiedDate[pageLen]), tz = "UTC")
-    last_mod <- sub(" E*T", "", lubridate::with_tz(last_mod_UTC, "America/New_York"))
+    last_mod <- fixTimeString(pageOfComments$data$
+                                attributes$lastModifiedDate[pageLen])
     last_name <- comment$data$id
     batchN <- batchN + 1
   }

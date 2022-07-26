@@ -243,13 +243,14 @@ downloadFilesAndGetText <- function(comment, destdir = "attachments"){
     # check the number of attachments
     N <- length(comment$included$id)
     
+    # if there's a single, restricted attachment, $fileFormats is NA, so in-loop test won't work
+    # restricted <- is.na(comment$included$attributes$fileFormats)
     
-    # check which comments are restricted
-    restricted <- !is.na(comment$included$attributes$restrictReasonType)
-    
-    for (j in 1:N){
+    for (i in 1:N){
       # to download files in order:
-      i <- comment$included$attributes$docOrder[j]
+      # i <- comment$included$attributes$docOrder[j]
+      
+      # print(paste("item", j, "is, on regs.gov, #", i))
       
       # should check if comment is restricted and skip download if so
       # currently breaks ONLY when there are multiple documents
@@ -257,7 +258,8 @@ downloadFilesAndGetText <- function(comment, destdir = "attachments"){
       
       # tests if the file is restricted. 
       # Unfortunately this works differently for single-attachment and multi-attachment comments
-      if (restricted[i]) {
+      if (is.na(comment$included$attributes$fileFormats)[1] | # 1 attchmt
+          is.null(comment$included$attributes$fileFormats[[i]])) { # >1 attchmt
         cat(paste("WARNING: attachment", i, "could not be downloaded from comment ",
                   comment$data$id, ", perhaps because of restrictReasonType: ", 
                   comment$included$attributes$restrictReasonType[i], "\n"),
@@ -293,7 +295,8 @@ downloadFilesAndGetText <- function(comment, destdir = "attachments"){
       
       # target the directory, filename, and extension
       # to avoid path errors, slashes ("/") in the title are replaced with hyphens ("-")
-      title <- paste0(sprintf("a%02d ", i),
+      j <- comment$included$attributes$docOrder[i]
+      title <- paste0(sprintf("a%02d ", j),
                       gsub("/", "-", comment$included$attributes$title[i]))
       if (nchar(title) > 64) {title <- substr(title, 1, 64)}
       filename <- paste0(title, ".", itemFormat)
@@ -317,7 +320,7 @@ downloadFilesAndGetText <- function(comment, destdir = "attachments"){
       else {
         attachmentText <- paste(pdf_text(destpath), collapse = "", sep = "/n")
         
-        fullText <- paste(fullText, "\n\n---\n", "Attachment", i, "title:\n",
+        fullText <- paste(fullText, "\n\n---\n", "Attachment", j, "title:\n",
                           comment$included$attributes$title[i], "\n---\n\n", 
                           attachmentText, sep = " ")
         
@@ -351,6 +354,8 @@ if (demo) {
   c0671 <- testDownload("EPA-HQ-OA-2018-0259-0671") # attachment is docx, not pdf
   c1388 <- testDownload("EPA-HQ-OA-2018-0259-1388") # no attachment (comment body only)
   c9240 <- testDownload("EPA-HQ-OA-2018-0259-9240") # slashes in filename
+  c8272 <- testDownload("EPA-HQ-OA-2018-0259-8272") # 14 attchmts but document order skips 12 and reaches 15
+  c9299 <- testDownload("EPA-HQ-OA-2018-0259-9299") # very long document title
 }
 
 
@@ -376,6 +381,7 @@ slug <- function(id) {
   return(word(id, 6, sep = "-"))
 }
 
+# fixTimeString takes the time in the form yyyy-mm-ddThh:mm:ssZ (as the API gives it) and returns yyyy-mm-dd hh:mm:ss (in Eastern Time) (as the API demands). Note that in URLs the space must be replaced with %20
 fixTimeString <- function(yyyymmddThhmmssZ) {
   last_mod_UTC <- as.POSIXct(sub("T", " ", yyyymmddThhmmssZ), tz = "UTC")
   last_mod <- sub(" E*T", "", lubridate::with_tz(last_mod_UTC,
@@ -414,14 +420,14 @@ to add comments one by one to a data frame that carries their `attributes` and a
   
     # if previous download was interrupted partway through, can specify starting with a particular comment
   # otherwise, this should be set to ""
-  startCommentID <- "EPA-HQ-OA-2018-0259-9299"
+  startCommentID <- ""
   
   # if you know how many comments deep the interrupt was, you can set that here so the script ends smoothly
   if (startCommentID != "") {
     url <- 
     startComment <- getCommentById(startCommentID)
     last_mod <- fixTimeString(startComment$data$attributes$modifyDate)
-    commentsAdded <- 5481 
+    commentsAdded <- 7560 
   }
 
   #setting comment count lower for testing
@@ -524,6 +530,8 @@ to add comments one by one to a data frame that carries their `attributes` and a
 3)  Test rate limit handling and run through while deleting files to find edge cases
 4)  OCR with PDFtools?
 5)  Make unified PDF
+5.1) including of multi-part comments like EDF (9240 &c) and NRDC (9299 &c)
+5.2) fix document ordering (removed because sometimes seems discontinuous?)
 6)  Statistical characterization:
 
 <!-- -->
@@ -532,6 +540,8 @@ a)  How many non-unique comments
 b)  Distribution of n_attachments
 c)  Distribution of time submitted
 d)  Any of these interact with institutional/individual/what was the other one categories?
+e)  How many documents need OCR-ing?
+4)  How many documents are restricted or otherwise need manual attention?
 
 <!-- -->
 

@@ -38,12 +38,14 @@ vignettes/*.pdf
 # R Environment Variables
 .Renviron
 
-# the large number of attachments generated in testing
+# the large number of attachments & data generated in testing
 /attachments
 !/attachments/test.pdf
+*.xlsx
+*.RData
 
 # logs and some deprecated code I've been playing around with
 log.txt
 out.txt
 /archived_code
-*.RData
+monitor

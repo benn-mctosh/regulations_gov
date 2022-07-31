@@ -117,6 +117,7 @@ getAPageOfComments <- function(page, objectID, last_mod = "", pSize = 250){
                   objectID, "&page[size]=", pSize, "&page[number]=", page,
                   "&sort=lastModifiedDate,documentId&api_key=", api_key)
   } else {
+    # Note that the space in the time string is replaced with '%20'
     url <- paste0("https://api.regulations.gov/v4/comments?filter[commentOnId]=",
                   objectID, "&filter[lastModifiedDate][ge]=", sub(" ", "%20", last_mod), 
                   "&page[size]=", pSize, "&page[number]=", page, 
@@ -168,7 +169,7 @@ We can see from df2 that the `objectId` of the 2018 proposed rule is "0900006483
 For now, we will focus on the 2018 proposed rule:
 
 ```{r}
-oID <- "090000648320bc9e"
+oID <- "090000648320bc9e" 
 ```
 
 ## How many comments?
@@ -267,7 +268,9 @@ getAuthorName <- function(comment) {
 
 getAttachmentDetails <- function(comment, destdir = "attachments"){
 
-  # create the directory in which to download attachments
+  # create the directory/s in which to download attachments
+  if (!dir.exists(destdir)) { dir.create(destdir)}
+  
   commentDir <- comment$data$id
   if (!dir.exists(paste(destdir, commentDir, sep = "/"))) {
     dir.create(paste(destdir, commentDir, sep = "/"))
@@ -429,14 +432,17 @@ nullToNA <- function(x) {
   return(x)
 }
 
-# slug takes a string in the form of *-*-*-*-*-* and extracts everything after the fifth hyphen
+# slug takes a string with at least one hyphen and extracts everything after the last hyphen
 # so for a comment's ID EPA-HQ-OA-2018-0259-####(#), it would extract the suffixed numbers
-# note that other agencies may have other ID formats
+# other agencies may have other ID formats, but "everything after last hyphen" seems like a decent slug for most dockets
 slug <- function(id) {
-  return(word(id, 6, sep = "-"))
+  numSegments <- str_count(id, "-") + 1
+  return(word(id, numSegments, sep = "-"))
 }
 
-# fixTimeString takes the time in the form yyyy-mm-ddThh:mm:ssZ (as the API gives it) and returns yyyy-mm-dd hh:mm:ss (in Eastern Time) (as the API demands). Note that in URLs the space must be replaced with %20
+# fixTimeString takes the time in the form yyyy-mm-ddThh:mm:ssZ (as the API gives it) 
+# and returns yyyy-mm-dd hh:mm:ss (in Eastern Time) (as the API demands). 
+# Note that in URLs the space must be replaced with "%20"; eg in getPageOfComments() 
 fixTimeString <- function(yyyymmddThhmmssZ) {
   last_mod_UTC <- as.POSIXct(sub("T", " ", yyyymmddThhmmssZ), tz = "UTC")
   last_mod <- sub(" E*T", "", lubridate::with_tz(last_mod_UTC,
@@ -463,14 +469,16 @@ to add comments one by one to a data frame that carries their `attributes`, both
 
   startTime <- lubridate::now()
 
-  pageLen <- 250 # will be 250 once tested
-  pagesPerBatch <- 20 # will be 5000/250 = 20 once tested
+  pageLen <- 250 
+  pagesPerBatch <- 20 
   commentCount <- getCommentCount(oID)
   
   # initialize some tracking variables
   last_mod <- ""
   batchN <- 1  
   commentsAdded <- 0
+  
+  attachmentsDest <- "tempattchmts"
 
   
     # if previous download was interrupted partway through, can specify starting with a particular comment
@@ -487,7 +495,7 @@ to add comments one by one to a data frame that carries their `attributes`, both
 
   # you may also set the comment count lower for testing purposes if you want
   # commentCount <- 900
-  textList <- rep("ID TBD", commentCount)
+  # textList <- rep("ID TBD", commentCount)
   
   commentDF <- as.data.frame(list(no = "data"))
   
@@ -501,7 +509,7 @@ to add comments one by one to a data frame that carries their `attributes`, both
       
       # don't bother adding more comments if we have all the comments we need
       # this will usually be the stop condition when collecting a full set of comments
-      if(nrow(commentDF) == commentCount) { 
+      if(commentsAdded == commentCount) { 
         stop = TRUE
         break 
       }
@@ -512,11 +520,12 @@ to add comments one by one to a data frame that carries their `attributes`, both
       pageOfComments <- getAPageOfComments(pageN, oID, last_mod, pageLen)
       cat(paste(" with", pageOfComments$meta$numberOfElements, "elements\n"),
           file="log.txt", append =TRUE)
-      cat(paste(" adding these to the", nrow(commentDF), "elements already added\n"),
+      cat(paste(" adding these to the", commentsAdded, "elements already added\n"),
            file="log.txt", append =TRUE)
       
       # for the first page on every batch but the first, find the comment where we left off
-      if ((pageN == 1) & (textList[1] != "ID TBD")) { 
+      if ((pageN == 1) & (commentsAdded != 0)) { 
+
         start <- match(last_name, pageOfComments$data$id) + 1
         cat(paste0("starting batch ", batchN," at ", start, "th comment\n"), file="log.txt", append =TRUE)
       } else {
@@ -549,9 +558,9 @@ to add comments one by one to a data frame that carries their `attributes`, both
                                               'comment', 'docketId', 'documentType', 'objectId', 
                                               'modifyDate', 'pageCount', 'postedDate', 'postmarkDate', 
                                               'receiveDate', 'subtype', 'title', 'withdrawn')]
-        localAtts <- getAttachmentDetails(comment)
+        localAtts <- getAttachmentDetails(comment, destdir = attachmentsDest)
         attsList <- nullToNA(c(list(ID = comment$data$id), localAtts, attsList))
-        if (i == 1 & pageN == 1) {
+        if (commentsAdded == 1) {
           commentDF <- as.data.frame(attsList)
         } else { 
           commentDF <- rbind.data.frame(commentDF, as.data.frame(attsList))
@@ -561,7 +570,7 @@ to add comments one by one to a data frame that carries their `attributes`, both
         # textList[commentsAdded] <- getAttachmentDetails(comment)
         # 
         #delete directory to save drive space during testing
-        # deldir <- paste("attachments", comment$data$id, sep = "/")
+        # deldir <- paste("tempattachments", comment$data$id, sep = "/")
         # unlink(deldir, recursive = TRUE)
       
       }
@@ -579,17 +588,17 @@ to add comments one by one to a data frame that carries their `attributes`, both
   # colnames(c)[1] <- "ID"
   # colnames(c)[2] <- "full text"
   # 
-  # save(c, file = "test2020_9k.Rdata")
+  save(commentDF, file = "text9k.Rdata")
   # 
   # cSmol <- subset(c, select = c(ID, `full text`, commentOnDocumentId, duplicateComments, 
   #                               comment, docketId, documentType, objectId, modifyDate, pageCount, 
   #                               postedDate, postmarkDate, receiveDate, subtype, title))
   # 
-  # wb <- createWorkbook()
-  # s <- createSheet(wb, sheetName = "Batch 1")
+  wb <- createWorkbook()
+  s <- createSheet(wb, sheetName = "comments")
   
   addDataFrame(commentDF, s, col.names = TRUE, row.names = FALSE, byrow = FALSE)
-  saveWorkbook(wb, "text9k.xlsx")
+  saveWorkbook(wb, "text9k_try2.xlsx")
   
   # log the total time and time per comment
   endTime <- lubridate::now()
@@ -604,7 +613,12 @@ to add comments one by one to a data frame that carries their `attributes`, both
 
 3)  Test rate limit handling and run through while deleting files to find edge cases
 4)  OCR with PDFtools?
-5)  Make unified PDF 5.1) including of multi-part comments like EDF (9240 &c) and NRDC (9299 &c) 5.2) fix document ordering (removed because sometimes seems discontinuous?)
+5)  Make unified PDF 
+
+5.1) including of multi-part comments like EDF (9240 &c) and NRDC (9299 &c) 
+
+5.2) fix document ordering (removed because sometimes seems discontinuous?)
+
 6)  Statistical characterization:
 
 <!-- -->

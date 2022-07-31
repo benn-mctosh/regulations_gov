@@ -363,7 +363,7 @@ pre code {
 <p>We would like this scraping to produce:</p>
 <ol style="list-style-type: decimal">
 <li><p>A data frame containing the text of every comment on the docket, as well as assorted metadata about the comments and the docket such as submitter name/type and objectID</p></li>
-<li><p>A directory containing PDFs (or similar NVivo-legible document) of every comment, in subdirectories named by comment ID for future search/analysis. The documents in this directory should include both the attachments to the comments themselves, as well as a holistic document, with a table of contents, that combines the comment and all attachments</p></li>
+<li><p>A directory containing PDFs (or similar NVivo-legible document) of every comment, in sub-directories named by comment ID for future search/analysis. The documents in this directory should include both the attachments to the comments themselves, as well as a holistic document, with a table of contents, that combines the comment and all attachments</p></li>
 </ol>
 <p>Documentation for the regulations.gov API is available <a href="https://open.gsa.gov/api/regulationsgov/">here</a>. An API key can be requested <a href="https://api.data.gov/signup/">here</a>.</p>
 <p>The below code assumes you have saved your API key as “regulations_gov_key” in your <code>renviron</code>. We also make use of a few libraries, listed above.</p>
@@ -458,6 +458,7 @@ pre code {
 <p>Every proposed rule, promulgated rule, comment, or supporting document has a unique <code>objectID</code>, a 16-character alphanumeric (since the only letters I’ve seen are a-f, presumably these are hexidecimal numbers somewhere in GSA’s back-end). Within a given rule-making process or “docket,” they also share a <code>docketID</code>, which is more human-readable. The <code>docketID</code>, suffixed by a hyphen and a few numerals, is also listed in each rule, comment, or supporting document as its <code>id</code>. So for instance, within the docket with <code>docketID</code> “EPA-HQ-OA-2018-0259”, we may see a proposed rule with <code>id</code> “EPA-HQ-OA-2018-0259-0001”, and a comment on said rule with <code>id</code> “EPA-HQ-OA-2018-0259-5041”, each with a unique hexadecimal <code>objectID</code></p>
 <p>We use the <code>httr</code> package to retrieve summary information for the docket ID. Here, we’re using the docket ID “EPA-HQ-OA-2018-0259” - your docket ID can be discovered by searching for your rule/proposal on <a href="regulations.gov" class="uri">regulations.gov</a>. Additionally filtering for “Proposed Rule” during the <code>GET()</code> call allows us to pull all four documents of <code>documentType</code> “Proposed Rule” in one <code>GET()</code> call (rather than paging through several pages of documents, mostly of <code>documentType</code> “Supporting &amp; Related Material”)</p>
 <pre class="r"><code>docketID &lt;- &quot;EPA-HQ-OA-2018-0259&quot;
+docketID &lt;- &quot;HHS-OASH-2022-0005&quot;
 
 if (demo) { 
   df &lt;- get_or_wait(url = paste0(&quot;https://api.regulations.gov/v4/documents?filter[docketId]=&quot;,
@@ -475,7 +476,7 @@ if (demo) {
 <p>The deadline extensions do not appear to have any associated comments, and have subtype “Extension of Comment Period,” which we can use to filter them out.</p>
 <p>We can see from df2 that the <code>objectId</code> of the 2018 proposed rule is “090000648320bc9e”, and for the 2020 supplement is “0900006484450a29”. These will allow retrieval of comments through the comments endpoint of the API</p>
 <p>For now, we will focus on the 2018 proposed rule:</p>
-<pre class="r"><code>oID &lt;- &quot;0900006484450a29&quot;</code></pre>
+<pre class="r"><code>oID &lt;- &quot;090000648501ce99&quot; #RESET THIS</code></pre>
 </div>
 <div id="how-many-comments" class="section level2">
 <h2>How many comments?</h2>
@@ -495,13 +496,13 @@ if(demo){ commentCount }</code></pre>
 </div>
 <div id="exploring-a-single-comment" class="section level2">
 <h2>Exploring a single comment</h2>
-<p>When we get a page of comments with an API call like in <code>getAPageOfComments()</code> above, we only get limited information about each comment. To get more details, including the content of the comment and its attachments, we need to request the data at each of the urls in <code>$data$links$self</code> in turn. For a page of 25 comments, <code>$data$links$self</code> will be a page of 25 links, each of which we can pass to the <code>getCommentByUrl()</code> function below.</p>
+<p>When we get a page of comments with an API call like in <code>getAPageOfComments()</code> above, we only get limited information about each comment. To get more details, including the content of the comment and its attachments, we need to request the data at each of the urls in <code>$data$links$self</code> in turn. For a page of 25 comments, <code>$data$links$self</code> will be a list of 25 links, each of which we can pass to the <code>getCommentByUrl()</code> function below.</p>
 <pre class="r"><code>getCommentByUrl &lt;- function(link){
   raw_comment &lt;- get_or_wait(paste0(link, &quot;?include=attachments&amp;api_key=&quot;, api_key))
   comment &lt;- fromJSON(rawToChar(raw_comment$content))
 }
 
-# if demo = TRUE, you can explore the structure of a single comment if you like
+# run the below code to explore the structure of the first comment on the first page
 if(demo){
   url &lt;- paste0(&quot;https://api.regulations.gov/v4/comments?filter[commentOnId]=&quot;,
                 oID, &quot;&amp;api_key=&quot;, api_key)
@@ -515,19 +516,48 @@ if(demo){
 <div id="downloading-attachments" class="section level1">
 <h1>Downloading attachments</h1>
 <p>Each comment’s details provide link to the attachments for download. Often, there is just a single attachment: the text of the comment; the comment itself will either duplicate this attachment of say something like “see attached.” Nevertheless, when we save and return the full text of a comment, we want both the comment body and the content of any attachments. This provides that. All attachments, as well as fullText.txt, are both saved in the directory <code>attachments/id</code> where ID is the more human readable ID (the docket ID suffixed with a hyphen and a few numerals). The function also returns the full text, which we will place in a data frame for future analysis.</p>
-<p>Most of the body of this function is devoted to handling various rare edge cases:</p>
+<p>Most of the body of the getAttachmentDetails function is devoted to handling various rare edge cases:</p>
 <ol style="list-style-type: decimal">
 <li><p>restricted (often copyrighted) attachments</p></li>
-<li><p>non-pdf files</p></li>
+<li><p>non-pdf files (which we aren’t yet parsing)</p></li>
 <li><p>files are occasionally available in multiple formats, which may or may not include our chosen format</p></li>
 <li><p>we may also occasionally encounter items that are not attachments, but I have not encountered this.</p></li>
+</ol>
+<p>While downloading, we’re going to extract a few attributes for later analysis - returned as a list localAttributes</p>
+<ol style="list-style-type: decimal">
+<li><p>$fullText is the content of everything including all attachments</p></li>
+<li><p>$coverAndComment contains the text of the content body, and of “comment.pdf” if it exists - this will catch the content many, but by no means all comments where the body either duplicates or merely directs the reader to an attached comment, while excluding supplementary material</p></li>
+<li><p>$attachmentCount should be obvious</p></li>
+<li><p>$nonPdfs is the number of attachem</p></li>
+<li><p>$restricteds is a boolean that is TRUE if any attachments are restricted (cannot be downloaded at all)</p></li>
+<li><p>$authorName attempts to parse the name of the comment’s author from the title of the comment, using getAuthorName()</p></li>
 </ol>
 <pre class="r"><code>getCommentById &lt;- function(id) {
   url &lt;- paste0(&quot;https://api.regulations.gov/v4/comments/&quot;, id)
   return(getCommentByUrl(url))
 }
 
-downloadFilesAndGetText &lt;- function(comment, destdir = &quot;attachments&quot;){
+getAuthorName &lt;- function(comment) {
+  title &lt;- comment$data$attributes$title
+  if (startsWith(title, &quot;Anonymous&quot;)) {return(&quot;Anonymous&quot;)}
+  if (startsWith(title, &quot;Mass Comment Campaign Sponsored&quot;)) {
+    return(paste(substr(title, 36, 1000), &quot;(mass mail)&quot;))
+  }
+  if (startsWith(title, &quot;Mass Comment Campaign sponsored&quot;)) {
+    return(paste(substr(title, 36, 1000), &quot;(mass mail)&quot;))
+  }
+  if (startsWith(title, &quot;Mass Comment Campaign sponsoring organization unknown&quot;)) {
+    return(&quot;unknown organization (mass mail)&quot;)
+  }
+  if (startsWith(title, &quot;Comment submitted by&quot;)) {
+    return (substr(title, 22, 1000))
+  }
+  
+  # if we haven't met the previous patterns, give up
+  return(title)
+}
+
+getAttachmentDetails &lt;- function(comment, destdir = &quot;attachments&quot;){
 
   # create the directory in which to download attachments
   commentDir &lt;- comment$data$id
@@ -535,8 +565,14 @@ downloadFilesAndGetText &lt;- function(comment, destdir = &quot;attachments&quot
     dir.create(paste(destdir, commentDir, sep = &quot;/&quot;))
   }
   
-  # add the text from the comment itself to the fullText string
-  fullText &lt;- comment$data$attributes$comment
+  localAttributes &lt;- list(fullText = &quot;&quot;, coverAndComment = &quot;&quot;, attachmentCount = 0, 
+                          nonPdfs = 0, restricteds = 0, authorName = &quot;&quot;)
+  
+  localAttributes$authorName &lt;- getAuthorName(comment)
+  
+  # add the text from the comment itself to the fullText string and the coverAndComment string
+  localAttributes$fullText &lt;- comment$data$attributes$comment
+  localAttributes$coverAndComment &lt;- comment$data$attributes$comment
   
   # if there are attachments, add them to the directory and to the fullText string
   if (!is.null(comment$included)) {
@@ -544,19 +580,16 @@ downloadFilesAndGetText &lt;- function(comment, destdir = &quot;attachments&quot
   
     # check the number of attachments
     N &lt;- length(comment$included$id)
+    localAttributes$attachmentCount &lt;- N
     
     # if there's a single, restricted attachment, $fileFormats is NA, so in-loop test won't work
     # restricted &lt;- is.na(comment$included$attributes$fileFormats)
     
     for (i in 1:N){
-      # to download files in order:
+      # to download files in order, you'd think you could iterate by j and comment in the below
       # i &lt;- comment$included$attributes$docOrder[j]
-      
       # print(paste(&quot;item&quot;, j, &quot;is, on regs.gov, #&quot;, i))
-      
-      # should check if comment is restricted and skip download if so
-      # currently breaks ONLY when there are multiple documents
-      # simply changing to is.null doesn't work
+      # but occasionally docOrder is not only unordered but non-contiguous (eg 2, 4, 1), so this breaks some stuff
       
       # tests if the file is restricted. 
       # Unfortunately this works differently for single-attachment and multi-attachment comments
@@ -566,8 +599,11 @@ downloadFilesAndGetText &lt;- function(comment, destdir = &quot;attachments&quot
                   comment$data$id, &quot;, perhaps because of restrictReasonType: &quot;, 
                   comment$included$attributes$restrictReasonType[i], &quot;\n&quot;),
             file=&quot;log.txt&quot;, append =TRUE)
-        fullText &lt;- paste(fullText, &quot;\n\n---\n&quot;, &quot;Attachment&quot;, i, &quot;title:\n&quot;, comment$included$attributes$title[i], 
-                          &quot;\n---\n&quot;, &quot;RESTRICTED (&quot;,comment$included$attributes$restrictReasonType[i], &quot;)&quot;, sep = &quot; &quot;)
+        localAttributes$fullText &lt;- paste(localAttributes$fullText, &quot;\n\n---\n&quot;, &quot;Attachment&quot;, i, 
+                                          &quot;title:\n&quot;, comment$included$attributes$title[i], 
+                                          &quot;\n---\n&quot;, &quot;RESTRICTED (&quot;,comment$included$attributes$restrictReasonType[i], &quot;)&quot;,
+                                          sep = &quot; &quot;)
+        localAttributes$restricteds &lt;- localAttributes$restricteds + 1
         next
       }
       
@@ -593,6 +629,7 @@ downloadFilesAndGetText &lt;- function(comment, destdir = &quot;attachments&quot
         cat(paste0(&quot;WARNING, item &quot;, i, &quot;'s type in comment &quot;, comment$data$id,
                    &quot; is not 'attachments' but&quot;, comment$included$type, &quot;\n&quot;), 
             file=&quot;log.txt&quot;, append =TRUE)
+        localAttributes$nonPdfs &lt;- localAttributes$nonPdfs + 1
       }
       
       # target the directory, filename, and extension
@@ -616,34 +653,40 @@ downloadFilesAndGetText &lt;- function(comment, destdir = &quot;attachments&quot
       if (itemFormat != &quot;pdf&quot;) {
         cat(paste0(&quot;WARNING, item &quot;, i, &quot;'s format in comment &quot;, comment$data$id,
                    &quot; is not 'pdf' but &quot;, itemFormat, &quot;\n&quot;), file=&quot;log.txt&quot;, append =TRUE)
-        fullText &lt;- paste(fullText, &quot;\n\n---\n&quot;, &quot;Attachment&quot;, i, &quot;title:\n&quot;, comment$included$attributes$title[i],
-                          &quot;\n---\n\n&quot;, &quot;UNPARSED &quot;, itemFormat, sep = &quot; &quot;)
+        localAttributes$fullText &lt;- paste(localAttributes$fullText, &quot;\n\n---\n&quot;, &quot;Attachment&quot;, i, 
+                                          &quot;title:\n&quot;, comment$included$attributes$title[i],
+                                          &quot;\n---\n\n&quot;, &quot;UNPARSED &quot;, itemFormat, sep = &quot; &quot;)
       } # Otherwise, download the PDF and grab the text 
       else {
         attachmentText &lt;- paste(pdf_text(destpath), collapse = &quot;&quot;, sep = &quot;/n&quot;)
         
-        fullText &lt;- paste(fullText, &quot;\n\n---\n&quot;, &quot;Attachment&quot;, j, &quot;title:\n&quot;,
+        localAttributes$fullText &lt;- paste(localAttributes$fullText, &quot;\n\n---\n&quot;, &quot;Attachment&quot;, j, &quot;title:\n&quot;,
                           comment$included$attributes$title[i], &quot;\n---\n\n&quot;, 
                           attachmentText, sep = &quot; &quot;)
+        if (title == &quot;Comment&quot;) {
+          localAttributes$coverAndComment &lt;- paste(localAttributes$coverAndComment, &quot;\n\n---- Comment.pdf ----\n\n&quot;,
+                                                   attachmentText)
+        }
         
       }
       
     }
     # TODO: combine all downloaded files into one big file - but idk if that's needed rn
-    # TODO: simply write the new text to a file progressively (r/t storing as a string)
-    #       (fullText can be a path if you want to do searching later)
+    # TODO: consider simply write the new text to a file progressively (r/t storing as a string)
+    #       (if so fullText can be a path if you want to do searching later)
     # TODO: fix so docs are downloaded/appended to .txt in order by the $docOrder list in $included$attributes
   }
 
   textFName &lt;- paste(destdir, commentDir, &quot;fullText.txt&quot;, sep = &quot;/&quot;)
-  cat(fullText, file = textFName, append = FALSE)
+  cat(localAttributes$fullText, file = textFName, append = FALSE)
+
   
-  return(fullText)
+  return(localAttributes)
 } 
 
 testDownload &lt;- function(id) {
   comment &lt;- getCommentById(id)
-  downloadFilesAndGetText(comment)
+  getAttachmentDetails(comment)
   return(comment)
 } 
 
@@ -676,7 +719,8 @@ nullToNA &lt;- function(x) {
 # so for a comment's ID EPA-HQ-OA-2018-0259-####(#), it would extract the suffixed numbers
 # note that other agencies may have other ID formats
 slug &lt;- function(id) {
-  return(word(id, 6, sep = &quot;-&quot;))
+  numSegments &lt;- str_count(id, &quot;-&quot;) + 1
+  return(word(id, numSegments, sep = &quot;-&quot;))
 }
 
 # fixTimeString takes the time in the form yyyy-mm-ddThh:mm:ssZ (as the API gives it) and returns yyyy-mm-dd hh:mm:ss (in Eastern Time) (as the API demands). Note that in URLs the space must be replaced with %20
@@ -693,34 +737,290 @@ fixTimeString &lt;- function(yyyymmddThhmmssZ) {
 <p><code>while (not enough comments) {</code></p>
 <p><code>for (each page in a batch) {</code></p>
 <p><code>for (each comment on a page) {do stuff}}}}</code></p>
-<p>to add comments one by one to a data frame that carries their <code>attributes</code> and a list that carries their ID and text. Then, it zips the data frame and list together using cbind.</p>
-<pre><code>## PDF error: Invalid Font Weight</code></pre>
-<pre><code>## PDF error: Mismatch between font type and embedded font file
-## PDF error: Mismatch between font type and embedded font file
-## PDF error: Mismatch between font type and embedded font file
-## PDF error: Mismatch between font type and embedded font file
-## PDF error: Mismatch between font type and embedded font file
-## PDF error: Mismatch between font type and embedded font file
-## PDF error: Mismatch between font type and embedded font file
-## PDF error: Mismatch between font type and embedded font file
-## PDF error: Mismatch between font type and embedded font file
-## PDF error: Mismatch between font type and embedded font file
-## PDF error: Mismatch between font type and embedded font file
-## PDF error: Mismatch between font type and embedded font file
-## PDF error: Mismatch between font type and embedded font file
-## PDF error: Mismatch between font type and embedded font file
-## PDF error: Mismatch between font type and embedded font file
-## PDF error: Mismatch between font type and embedded font file
-## PDF error: Mismatch between font type and embedded font file
-## PDF error: Mismatch between font type and embedded font file
-## PDF error: Mismatch between font type and embedded font file
-## PDF error: Mismatch between font type and embedded font file
-## PDF error: Mismatch between font type and embedded font file
-## PDF error: Mismatch between font type and embedded font file</code></pre>
-<pre><code>## PDF error: No current point in closepath
-## PDF error: No current point in closepath
-## PDF error: No current point in closepath</code></pre>
-<pre><code>## Run time of 20.8191589794556 or 0.00158949144750768 per comment</code></pre>
+<p>to add comments one by one to a data frame that carries their <code>attributes</code>, both those pulled from the comment itself and from the getAttachmentDetails() function.</p>
+<pre><code>## PDF error: Invalid Font Weight
+## PDF error: Invalid Font Weight
+## PDF error: Invalid Font Weight
+## PDF error: Invalid Font Weight
+## PDF error: Invalid Font Weight
+## PDF error: Invalid Font Weight
+## PDF error: Invalid Font Weight
+## PDF error: Invalid Font Weight
+## PDF error: Invalid Font Weight
+## PDF error: Invalid Font Weight
+## PDF error: Invalid Font Weight
+## PDF error: Invalid Font Weight
+## PDF error: Invalid Font Weight
+## PDF error: Invalid Font Weight
+## PDF error: Invalid Font Weight
+## PDF error: Invalid Font Weight
+## PDF error: Invalid Font Weight
+## PDF error: Invalid Font Weight
+## PDF error: Invalid Font Weight
+## PDF error: Invalid Font Weight
+## PDF error: Invalid Font Weight
+## PDF error: Invalid Font Weight
+## PDF error: Invalid Font Weight
+## PDF error: Invalid Font Weight
+## PDF error: Invalid Font Weight
+## PDF error: Invalid Font Weight
+## PDF error: Invalid Font Weight
+## PDF error: Invalid Font Weight
+## PDF error: Invalid Font Weight
+## PDF error: Invalid Font Weight
+## PDF error: Invalid Font Weight
+## PDF error: Invalid Font Weight
+## PDF error: Invalid Font Weight
+## PDF error: Invalid Font Weight
+## PDF error: Invalid Font Weight
+## PDF error: Invalid Font Weight
+## PDF error: Invalid Font Weight
+## PDF error: Invalid Font Weight
+## PDF error: Invalid Font Weight
+## PDF error: Invalid Font Weight
+## PDF error: Invalid Font Weight
+## PDF error: Invalid Font Weight
+## PDF error: Invalid Font Weight
+## PDF error: Invalid Font Weight
+## PDF error: Invalid Font Weight
+## PDF error: Invalid Font Weight
+## PDF error: Invalid Font Weight
+## PDF error: Invalid Font Weight
+## PDF error: Invalid Font Weight
+## PDF error: Invalid Font Weight
+## PDF error: Invalid Font Weight
+## PDF error: Invalid Font Weight
+## PDF error: Invalid Font Weight
+## PDF error: Invalid Font Weight
+## PDF error: Invalid Font Weight
+## PDF error: Invalid Font Weight
+## PDF error: Invalid Font Weight
+## PDF error: Invalid Font Weight
+## PDF error: Invalid Font Weight
+## PDF error: Invalid Font Weight
+## PDF error: Invalid Font Weight
+## PDF error: Invalid Font Weight
+## PDF error: Invalid Font Weight
+## PDF error: Invalid Font Weight
+## PDF error: Invalid Font Weight
+## PDF error: Invalid Font Weight
+## PDF error: Invalid Font Weight
+## PDF error: Invalid Font Weight
+## PDF error: Invalid Font Weight
+## PDF error: Invalid Font Weight
+## PDF error: Invalid Font Weight
+## PDF error: Invalid Font Weight
+## PDF error: Invalid Font Weight
+## PDF error: Invalid Font Weight
+## PDF error: Invalid Font Weight
+## PDF error: Invalid Font Weight
+## PDF error: Invalid Font Weight
+## PDF error: Invalid Font Weight
+## PDF error: Invalid Font Weight
+## PDF error: Invalid Font Weight
+## PDF error: Invalid Font Weight
+## PDF error: Invalid Font Weight
+## PDF error: Invalid Font Weight
+## PDF error: Invalid Font Weight
+## PDF error: Invalid Font Weight
+## PDF error: Invalid Font Weight
+## PDF error: Invalid Font Weight
+## PDF error: Invalid Font Weight
+## PDF error: Invalid Font Weight
+## PDF error: Invalid Font Weight
+## PDF error: Invalid Font Weight
+## PDF error: Invalid Font Weight
+## PDF error: Invalid Font Weight
+## PDF error: Invalid Font Weight
+## PDF error: Invalid Font Weight
+## PDF error: Invalid Font Weight
+## PDF error: Invalid Font Weight
+## PDF error: Invalid Font Weight
+## PDF error: Invalid Font Weight
+## PDF error: Invalid Font Weight
+## PDF error: Invalid Font Weight
+## PDF error: Invalid Font Weight
+## PDF error: Invalid Font Weight
+## PDF error: Invalid Font Weight
+## PDF error: Invalid Font Weight
+## PDF error: Invalid Font Weight
+## PDF error: Invalid Font Weight
+## PDF error: Invalid Font Weight
+## PDF error: Invalid Font Weight
+## PDF error: Invalid Font Weight
+## PDF error: Invalid Font Weight
+## PDF error: Invalid Font Weight
+## PDF error: Invalid Font Weight
+## PDF error: Invalid Font Weight
+## PDF error: Invalid Font Weight
+## PDF error: Invalid Font Weight</code></pre>
+<pre><code>## PDF error: Unknown font type: ''
+## PDF error: Unknown font type: ''</code></pre>
+<pre><code>## PDF error: Invalid Font Weight
+## PDF error: Invalid Font Weight
+## PDF error: Invalid Font Weight
+## PDF error: Invalid Font Weight
+## PDF error: Invalid Font Weight
+## PDF error: Invalid Font Weight
+## PDF error: Invalid Font Weight
+## PDF error: Invalid Font Weight
+## PDF error: Invalid Font Weight
+## PDF error: Invalid Font Weight
+## PDF error: Invalid Font Weight
+## PDF error: Invalid Font Weight
+## PDF error: Invalid Font Weight
+## PDF error: Invalid Font Weight
+## PDF error: Invalid Font Weight
+## PDF error: Invalid Font Weight
+## PDF error: Invalid Font Weight
+## PDF error: Invalid Font Weight
+## PDF error: Invalid Font Weight
+## PDF error: Invalid Font Weight
+## PDF error: Invalid Font Weight
+## PDF error: Invalid Font Weight
+## PDF error: Invalid Font Weight
+## PDF error: Invalid Font Weight
+## PDF error: Invalid Font Weight
+## PDF error: Invalid Font Weight
+## PDF error: Invalid Font Weight
+## PDF error: Invalid Font Weight
+## PDF error: Invalid Font Weight
+## PDF error: Invalid Font Weight
+## PDF error: Invalid Font Weight
+## PDF error: Invalid Font Weight
+## PDF error: Invalid Font Weight
+## PDF error: Invalid Font Weight
+## PDF error: Invalid Font Weight
+## PDF error: Invalid Font Weight
+## PDF error: Invalid Font Weight
+## PDF error: Invalid Font Weight
+## PDF error: Invalid Font Weight
+## PDF error: Invalid Font Weight
+## PDF error: Invalid Font Weight
+## PDF error: Invalid Font Weight
+## PDF error: Invalid Font Weight
+## PDF error: Invalid Font Weight
+## PDF error: Invalid Font Weight
+## PDF error: Invalid Font Weight
+## PDF error: Invalid Font Weight
+## PDF error: Invalid Font Weight
+## PDF error: Invalid Font Weight
+## PDF error: Invalid Font Weight
+## PDF error: Invalid Font Weight
+## PDF error: Invalid Font Weight
+## PDF error: Invalid Font Weight
+## PDF error: Invalid Font Weight
+## PDF error: Invalid Font Weight
+## PDF error: Invalid Font Weight
+## PDF error: Invalid Font Weight
+## PDF error: Invalid Font Weight
+## PDF error: Invalid Font Weight
+## PDF error: Invalid Font Weight
+## PDF error: Invalid Font Weight
+## PDF error: Invalid Font Weight
+## PDF error: Invalid Font Weight
+## PDF error: Invalid Font Weight
+## PDF error: Invalid Font Weight
+## PDF error: Invalid Font Weight
+## PDF error: Invalid Font Weight
+## PDF error: Invalid Font Weight
+## PDF error: Invalid Font Weight
+## PDF error: Invalid Font Weight
+## PDF error: Invalid Font Weight
+## PDF error: Invalid Font Weight
+## PDF error: Invalid Font Weight
+## PDF error: Invalid Font Weight
+## PDF error: Invalid Font Weight
+## PDF error: Invalid Font Weight
+## PDF error: Invalid Font Weight
+## PDF error: Invalid Font Weight
+## PDF error: Invalid Font Weight
+## PDF error: Invalid Font Weight
+## PDF error: Invalid Font Weight
+## PDF error: Invalid Font Weight
+## PDF error: Invalid Font Weight
+## PDF error: Invalid Font Weight
+## PDF error: Invalid Font Weight
+## PDF error: Invalid Font Weight
+## PDF error: Invalid Font Weight
+## PDF error: Invalid Font Weight
+## PDF error: Invalid Font Weight
+## PDF error: Invalid Font Weight
+## PDF error: Invalid Font Weight
+## PDF error: Invalid Font Weight
+## PDF error: Invalid Font Weight
+## PDF error: Invalid Font Weight
+## PDF error: Invalid Font Weight
+## PDF error: Invalid Font Weight
+## PDF error: Invalid Font Weight
+## PDF error: Invalid Font Weight
+## PDF error: Invalid Font Weight
+## PDF error: Invalid Font Weight
+## PDF error: Invalid Font Weight
+## PDF error: Invalid Font Weight
+## PDF error: Invalid Font Weight
+## PDF error: Invalid Font Weight
+## PDF error: Invalid Font Weight
+## PDF error: Invalid Font Weight
+## PDF error: Invalid Font Weight
+## PDF error: Invalid Font Weight
+## PDF error: Invalid Font Weight
+## PDF error: Invalid Font Weight
+## PDF error: Invalid Font Weight
+## PDF error: Invalid Font Weight
+## PDF error: Invalid Font Weight
+## PDF error: Invalid Font Weight
+## PDF error: Invalid Font Weight
+## PDF error: Invalid Font Weight
+## PDF error: Invalid Font Weight
+## PDF error: Invalid Font Weight
+## PDF error: Invalid Font Weight
+## PDF error: Invalid Font Weight</code></pre>
+<pre><code>## PDF error: Could not parse ligature component &quot;arrow&quot; of &quot;arrow_up&quot; in parseCharName</code></pre>
+<pre><code>## PDF error: Could not parse ligature component &quot;up&quot; of &quot;arrow_up&quot; in parseCharName</code></pre>
+<pre><code>## PDF error: xref num 104 not found but needed, try to reconstruct&lt;0a&gt;</code></pre>
+<pre><code>## PDF error: Invalid Font Weight
+## PDF error: Invalid Font Weight
+## PDF error: Invalid Font Weight
+## PDF error: Invalid Font Weight
+## PDF error: Invalid Font Weight
+## PDF error: Invalid Font Weight
+## PDF error: Invalid Font Weight
+## PDF error: Invalid Font Weight
+## PDF error: Invalid Font Weight
+## PDF error: Invalid Font Weight
+## PDF error: Invalid Font Weight
+## PDF error: Invalid Font Weight
+## PDF error: Invalid Font Weight
+## PDF error: Invalid Font Weight
+## PDF error: Invalid Font Weight
+## PDF error: Invalid Font Weight
+## PDF error: Invalid Font Weight
+## PDF error: Invalid Font Weight
+## PDF error: Invalid Font Weight
+## PDF error: Invalid Font Weight
+## PDF error: Invalid Font Weight
+## PDF error: Invalid Font Weight
+## PDF error: Invalid Font Weight
+## PDF error: Invalid Font Weight
+## PDF error: Invalid Font Weight
+## PDF error: Invalid Font Weight
+## PDF error: Invalid Font Weight
+## PDF error: Invalid Font Weight
+## PDF error: Invalid Font Weight
+## PDF error: Invalid Font Weight
+## PDF error: Invalid Font Weight
+## PDF error: Invalid Font Weight
+## PDF error: Invalid Font Weight
+## PDF error: Invalid Font Weight
+## PDF error: Invalid Font Weight
+## PDF error: Invalid Font Weight
+## PDF error: Invalid Font Weight
+## PDF error: Invalid Font Weight
+## PDF error: Invalid Font Weight</code></pre>
+<pre><code>## Warning in addDataFrame(commentDF, s, col.names = TRUE, row.names = FALSE, :
+## Some cells exceed Excel's limit of 32767 characters and they will be truncated</code></pre>
+<pre><code>## Run time of 6.63624473412832 or 0.00724480866171213 per comment</code></pre>
 </div>
 </div>
 <div id="next-steps" class="section level1">
@@ -728,17 +1028,32 @@ fixTimeString &lt;- function(yyyymmddThhmmssZ) {
 <ol start="3" style="list-style-type: decimal">
 <li>Test rate limit handling and run through while deleting files to find edge cases</li>
 <li>OCR with PDFtools?</li>
-<li>Make unified PDF 5.1) including of multi-part comments like EDF (9240 &amp;c) and NRDC (9299 &amp;c) 5.2) fix document ordering (removed because sometimes seems discontinuous?)</li>
+<li>Make unified PDF</li>
+</ol>
+<p>5.1) including of multi-part comments like EDF (9240 &amp;c) and NRDC (9299 &amp;c)</p>
+<p>5.2) fix document ordering (removed because sometimes seems discontinuous?)</p>
+<ol start="6" style="list-style-type: decimal">
 <li>Statistical characterization:</li>
 </ol>
 <!-- -->
 <ol style="list-style-type: lower-alpha">
 <li>How many non-unique comments</li>
 <li>Distribution of n_attachments</li>
+</ol>
+<ul>
+<li>Number of attachments?</li>
+<li>Is there a comment.pdf attachment?</li>
+<li>Are there non-pdf attachments?</li>
+<li>Are there restricted attachments?</li>
+<li>body + comment.pdf</li>
+<li>grab author name?</li>
+</ul>
+<ol start="3" style="list-style-type: lower-alpha">
 <li>Distribution of time submitted</li>
 <li>Any of these interact with institutional/individual/what was the other one categories?</li>
 <li>How many documents need OCR-ing?</li>
 </ol>
+<!-- -->
 <ol start="4" style="list-style-type: decimal">
 <li>How many documents are restricted or otherwise need manual attention?</li>
 </ol>

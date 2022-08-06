@@ -39,9 +39,10 @@ vignettes/*.pdf
 .Renviron
 
 # the large number of attachments & data generated in testing
-/attachments
+/attachments*
 /tempattchmts
 !/attachments/test.pdf
+/archived_data
 *.xlsx
 *.RData
 

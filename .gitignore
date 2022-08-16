@@ -40,8 +40,8 @@ vignettes/*.pdf
 
 # the large number of attachments & data generated in testing
 /attachments*
-/tempattchmts
 !/attachments/test.pdf
+/tempattchmts
 /archived_data
 *.xlsx
 *.RData

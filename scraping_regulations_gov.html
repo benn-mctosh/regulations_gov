@@ -362,7 +362,8 @@ pre code {
 <p>For a research project, we need to scrape comments submitted to the Environmental Protection Agency on a proposed rule. The comments are posted on <a href="https://www.regulations.gov/document/EPA-HQ-OA-2018-0259-9322/comment">regulations.gov</a>.</p>
 <p>We would like this scraping to produce:</p>
 <ol style="list-style-type: decimal">
-<li><p>A data frame containing the text of every comment on the docket, as well as assorted metadata about the comments and the docket such as submitter name/type and objectID</p></li>
+<li><p>A data.frame containing the text of every comment on the docket, as well as assorted metadata about the comments and the docket such as submitter name/type and objectID</p></li>
+<li><p>A List of the comments in the docket, in the form they are downloaded</p></li>
 <li><p>A directory containing PDFs (or similar NVivo-legible document) of every comment, in sub-directories named by comment ID for future search/analysis. The documents in this directory should include both the attachments to the comments themselves, as well as a holistic document, with a table of contents, that combines the comment and all attachments</p></li>
 </ol>
 <p>Documentation for the regulations.gov API is available <a href="https://open.gsa.gov/api/regulationsgov/">here</a>. An API key can be requested <a href="https://api.data.gov/signup/">here</a>.</p>
@@ -373,7 +374,7 @@ pre code {
 <div id="rate-limits" class="section level2">
 <h2>Rate Limits</h2>
 <p>The GSA imposes a <a href="https://api.data.gov/docs/rate-limits/">rate limit</a> of 1000 requests per hour (on a rolling basis) for the api keys it distributes. To avoid running afoul of these, we use a wrapper for the GET() function that simply pauses execution when we approach the limits. This is not the most efficient solution, since the rate limits function on a rolling basis (so if we made our first request at 10:15 and our 1000th at 10:25 we could start making new requests at 11:15, not 11:25), but it will serve for the scale at which we are working.</p>
-<p>NOTE: It seems like the rate limiting doesn’t refresh as quickly as we might prefer, so we sleep for an extra 5 minutes</p>
+<p>NOTE: It seems like the rate limiting doesn’t refresh as quickly as we might prefer, so we sleep for an extra 5 minutes. The GSA does have a way of requesting an increase to your rate limit. Since we will mostly be working with files offline, we haven’t done that, but you may want to</p>
 <pre class="r"><code>get_or_wait &lt;- function(url) {
   
   # GET the item from the URL given.
@@ -403,26 +404,52 @@ pre code {
   
   # I got an error once where this was true and have not yet been able to reproduce it, so just in case...
   if (length(remaining &lt; 5) == 0) {
-    cat(paste0(&quot;\nthat error where remaining &lt; 5 is of length 0 happened again, saving r&quot;))
-    saveRDS(r, &quot;badRawComment.Rdata&quot;)
+    message(&quot;got that error where remaining &lt; 5 is of length 0 happened again, saving raw data&quot;)
+    saveRDS(r, &quot;badRawComment.RData&quot;)
   }
   
   # If remaining requests are low, sleep for an hour and then resume execution, reporting the action in &quot;log.txt&quot;
   if (remaining &lt; 5) {
     pauseTime &lt;- lubridate::now()
-    cat(paste0(&quot;\n APPROACHING RATE LIMIT: pausing until 1hr 5min from &quot;, pauseTime, &quot;\n&quot;,
-               &quot;requests remaining currently: &quot;, remaining, &quot;\n&quot;),
-        file = &quot;log.txt&quot;, append = TRUE)
+    message(&quot;APPROACHING RATE LIMIT: pausing until 1hr 5min from &quot;, pauseTime, &quot;\n&quot;,
+               &quot;requests remaining currently: &quot;, remaining, &quot;\n&quot;)
     Sys.sleep(3900)
     restartTime &lt;- lubridate::now()
     r &lt;- GET(url)
     remaining &lt;- as.integer(r$headers$`x-ratelimit-remaining`)
-    cat(paste0(&quot;Restarting at &quot;, restartTime, &quot;; requests remaining currently: &quot;, remaining, &quot;\n&quot;), 
-        file = &quot;log.txt&quot;, append = TRUE)
+    message(&quot;Restarting at &quot;, restartTime, &quot;; requests remaining currently: &quot;, remaining, &quot;\n&quot;)
   }
   return(r)
 }</code></pre>
-<p>Note the messages saved to <code>log.txt</code>. These (and others below) are the ones I have found most useful in debugging; running this code, especially the download function below, generates many other notes and warnings to <code>stdout</code> that I have found less useful, so tend to pipe to pipe to a separate file such as <code>out.txt</code>. To facilitate this, both <code>log.txt</code> and <code>out.txt</code> are currently listed in <code>.gitignore</code></p>
+<p>Note the messages in the above. These (and others below) are the ones I have found most useful in debugging; running this code, especially the download function below, generates many other messages to <code>stdout</code> that I have found less useful.</p>
+</div>
+<div id="helper-functions" class="section level2">
+<h2>Helper functions</h2>
+<p>Before we run the request, a few helper functions help us log which comments have been downloaded and put all the comments together into a data frame.</p>
+<pre class="r"><code># nullToNA replaces NULL elements of a list with NA
+nullToNA &lt;- function(x) {
+  x[sapply(x, is.null)] &lt;- NA
+  return(x)
+}
+
+# slug() takes a string with at least one hyphen and extracts everything after the last hyphen
+# so for a comment's ID EPA-HQ-OA-2018-0259-####(#), it would extract the suffixed numbers
+# other agencies may have other ID formats, but &quot;everything after last hyphen&quot; seems like a decent slug for most dockets
+# I also use this to get file extensions from filenames (sep = &quot;.&quot;)
+slug &lt;- function(string, sep = &quot;-&quot;) {
+  numSegments &lt;- str_count(string, sep) + 1
+  return(word(string, numSegments, sep = sep))
+}
+
+# fixTimeString takes the time in the form yyyy-mm-ddThh:mm:ssZ (as the API gives it) 
+# and returns yyyy-mm-dd hh:mm:ss (in Eastern Time) (as the API demands). 
+# Note that in URLs the space must be replaced with &quot;%20&quot;; eg in getPageOfComments() 
+fixTimeString &lt;- function(yyyymmddThhmmssZ) {
+  last_mod_UTC &lt;- as.POSIXct(sub(&quot;T&quot;, &quot; &quot;, yyyymmddThhmmssZ), tz = &quot;UTC&quot;)
+  last_mod &lt;- sub(&quot; E*T&quot;, &quot;&quot;, lubridate::with_tz(last_mod_UTC,
+                                                 &quot;America/New_York&quot;))
+  return(last_mod)
+}</code></pre>
 </div>
 <div id="page-limits" class="section level2">
 <h2>Page limits</h2>
@@ -476,7 +503,7 @@ if (demo) {
 <p>The deadline extensions do not appear to have any associated comments, and have subtype “Extension of Comment Period,” which we can use to filter them out.</p>
 <p>We can see from df2 that the <code>objectId</code> of the 2018 proposed rule is “090000648320bc9e”, and for the 2020 supplement is “0900006484450a29”. These will allow retrieval of comments through the comments endpoint of the API</p>
 <p>For now, we will focus on the 2018 proposed rule:</p>
-<pre class="r"><code>oID &lt;- &quot;090000648320bc9e&quot; </code></pre>
+<pre class="r"><code>oID &lt;- &quot;0900006484450a29&quot; </code></pre>
 </div>
 <div id="how-many-comments" class="section level2">
 <h2>How many comments?</h2>
@@ -528,14 +555,14 @@ if(demo){
 <li><p>$fullText is the content of everything including all attachments</p></li>
 <li><p>$coverAndComment contains the text of the content body, and of “comment.pdf” if it exists - this will catch the content many, but by no means all comments where the body either duplicates or merely directs the reader to an attached comment, while excluding supplementary material</p></li>
 <li><p>$attachmentCount should be obvious</p></li>
-<li><p>$nonPdfs is the number of attachem</p></li>
-<li><p>$restricteds is a boolean that is TRUE if any attachments are restricted (cannot be downloaded at all)</p></li>
-<li><p>$authorName attempts to parse the name of the comment’s author from the title of the comment, using getAuthorName()</p></li>
+<li><p>$nonPdfs is the number of attachements that are not pdfs</p></li>
+<li><p>$restricteds is the number of restricted documents</p></li>
+<li><p>$authorName attempts to parse the name of the comment’s author from the title of the comment, using getAuthorName(). If it can’t, it simply uses the entire title. This works on comments for the EPA proposed rules I’ve seen, but for other sorts of comments it may produce a field that merely replicates the “title” field</p></li>
 </ol>
 <pre class="r"><code>getCommentById &lt;- function(id) {
   url &lt;- paste0(&quot;https://api.regulations.gov/v4/comments/&quot;, id)
   return(getCommentByUrl(url))
-}
+} # Ready
 
 getAuthorName &lt;- function(comment) {
   title &lt;- comment$data$attributes$title
@@ -555,141 +582,190 @@ getAuthorName &lt;- function(comment) {
   
   # if we haven't met the previous patterns, give up
   return(title)
+} # Ready 
+
+filenameFromTitle &lt;- function(j, title, format = &quot;pdf&quot;, maxLen = 64) {
+  # to avoid path errors, we replace &quot;/&quot; with &quot;-&quot; 
+  filename &lt;- paste0(sprintf(&quot;a%02d_&quot;, j), gsub(&quot;/&quot;, &quot;-&quot;,title))
+  if (nchar(title) &gt; maxLen) {title &lt;- substr(title, 1, maxLen)}
+  return(paste0(filename, &quot;.&quot;, format))
+} # Ready
+
+filenamesFromComment &lt;- function(comment, maxLen = 64) {
+
+  N &lt;- length(comment$included$id)
+  filenames = rep(NA, N)
+  for (i in 1:N) {
+    availableFormats &lt;- comment[[&quot;included&quot;]][[&quot;attributes&quot;]][[&quot;fileFormats&quot;]][[i]][[2]]
+    if (&quot;pdf&quot; %in% availableFormats) {
+      itemFormat &lt;- &quot;pdf&quot;
+      fi &lt;- match(&quot;pdf&quot;, availableFormats)
+    } else {
+      itemFormat &lt;- availableFormats[1]
+      fi &lt;- 1
+    }
+    filenames[i] &lt;- filenameFromTitle(comment$included$attributes$docOrder[i], 
+                                      comment$included$attributes$title[i],
+                                      format = itemFormat, maxLen = maxLen)
+  }
+  return(filenames)
 }
 
-getAttachmentDetails &lt;- function(comment, destdir = &quot;attachments&quot;){
-
-  # create the directory/s in which to download attachments
-  if (!dir.exists(destdir)) { dir.create(destdir)}
+# Downloads attachments from the web, and returns some details about them
+downloadAttachmentsTo &lt;- function(comment, pathPrefix = &quot;test&quot;) {
   
-  commentDir &lt;- comment$data$id
-  if (!dir.exists(paste(destdir, commentDir, sep = &quot;/&quot;))) {
-    dir.create(paste(destdir, commentDir, sep = &quot;/&quot;))
+  if (!dir.exists(pathPrefix)) { dir.create(pathPrefix) }
+  
+  # if the attachments consist of a single, restricted file we need to run a different test
+  if (is.na(comment$included$attributes$fileFormats)[1]) { 
+    message(&quot;WARNING: sole attachment could not be downloaded from comment &quot;,
+            comment$data$id, &quot;, perhaps because of restrictReasonType: &quot;, 
+            comment$included$attributes$restrictReasonType[1])
+    return()
+  }  
+  
+  filenames &lt;- filenamesFromComment(comment)
+  N &lt;- length(filenames)
+
+  for (i in 1:N) {
+    
+    # tests if the file is restricted. 
+    if (is.null(comment$included$attributes$fileFormats[[i]])) { # &gt;1 attchmt
+      message(&quot;WARNING: attachment &quot;, i, &quot; could not be downloaded from comment &quot;,
+                comment$data$id, &quot;, perhaps because of restrictReasonType: &quot;, 
+                comment$included$attributes$restrictReasonType[i])
+      next
+    }
+    
+    itemFormat &lt;- slug(filenames[i], sep = &quot;\\.&quot;)
+
+    # Warn the user if the file is not marked as an attachment or is not a pdf
+    # I've never seen the former come up but I'd sure want a warning if it did!
+    if (comment$included$type[i] != &quot;attachments&quot;) {
+      message(&quot;WARNING: item &quot;, i, &quot;'s type in comment &quot;, comment$data$id,
+                 &quot; is not 'attachments' but&quot;, comment$included$type) 
+    }
+    if (itemFormat != &quot;pdf&quot;) {
+      message(&quot;WARNING: item #&quot;, i, &quot;: &quot;, filenames[i], &quot; is not pdf but &quot;, itemFormat)
+    }
+    
+    destpath &lt;- paste(pathPrefix, filenames[i], sep = &quot;/&quot;)
+    
+    # print(paste0(&quot;found &quot;, filename, &quot; an &quot;, comment$included$type[i], &quot; with format &quot;,
+    # itemFormat))
+    
+    # download the file to the targeted path
+    
+    # first we need to make sure we're grabbing the URL with the right extension
+    links &lt;- as.list(comment$included$attributes$fileFormats[[i]]$fileUrl)
+    pattern &lt;- paste0(&quot;*\\.&quot;, itemFormat)
+    link &lt;- links[grepl(pattern, links)]
+    suppressMessages(download.file(link[[1]], destfile = destpath, mode = &quot;wb&quot;, quiet = TRUE))
+  
+  }
+    # TODO: combine all downloaded files into one big file PDF - but idk if that's needed rn
+
+}
+
+# Returns a list of &quot;local&quot; attributes, and downloads the comments if &quot;download&quot; is true
+# Should call either downloadAttachmentsTo or loadAttachmentsFrom to grab the attachment text
+getAttachmentDetails &lt;- function(comment, destdir = &quot;attachments&quot;, doDownload = TRUE){
+
+  # attachments will be stored in destdir/commentId
+  pathPrefix &lt;- paste(destdir, comment$data$id, sep = &quot;/&quot;)
+
+  # The below may go into the downloadAttachmentsTo function
+  if (doDownload) {
+    if (!dir.exists(destdir)) { dir.create(destdir) }
+    if (!dir.exists(pathPrefix)) { dir.create(pathPrefix) }
   }
   
   localAttributes &lt;- list(fullText = &quot;&quot;, coverAndComment = &quot;&quot;, attachmentCount = 0, 
-                          nonPdfs = 0, restricteds = 0, authorName = &quot;&quot;)
+                          nonPdfs = 0, restricteds = 0, authorName = getAuthorName(comment))
   
-  localAttributes$authorName &lt;- getAuthorName(comment)
+  # fullText.txt header
+  textFName &lt;- paste(pathPrefix, &quot;fullText.txt&quot;, sep = &quot;/&quot;)
+
+  cat(&quot;Full text of comment&quot;, comment$data$id, 
+      &quot;\nAuthor:&quot;, localAttributes$authorName, &quot;\n\n&quot;, 
+      file = textFName, append = FALSE)
   
-  # add the text from the comment itself to the fullText string and the coverAndComment string
-  localAttributes$fullText &lt;- comment$data$attributes$comment
-  localAttributes$coverAndComment &lt;- comment$data$attributes$comment
+  # add comment to fullText.txt
+  cat(comment$data$attributes$comment, file = textFName, append = TRUE)
   
+  # if there aren't attachments, you have the data you need
+  if (is.null(comment$included)) {
+    text &lt;- readChar(textFName, file.info(textFName)$size)
+    localAttributes$fullText &lt;- text
+    localAttributes$coverAndComment &lt;- text
+    return(localAttributes)
+  } 
   # if there are attachments, add them to the directory and to the fullText string
-  if (!is.null(comment$included)) {
 
+  # get the attachments if needed
+  if (doDownload) { downloadAttachmentsTo(comment, pathPrefix = pathPrefix) }
+
+  # get the text of Comment.pdf if it exists
   
-    # check the number of attachments
-    N &lt;- length(comment$included$id)
-    localAttributes$attachmentCount &lt;- N
-    
-    # if there's a single, restricted attachment, $fileFormats is NA, so in-loop test won't work
-    # restricted &lt;- is.na(comment$included$attributes$fileFormats)
-    
-    for (i in 1:N){
-      # to download files in order, you'd think you could iterate by j and comment in the below
-      # i &lt;- comment$included$attributes$docOrder[j]
-      # print(paste(&quot;item&quot;, j, &quot;is, on regs.gov, #&quot;, i))
-      # but occasionally docOrder is not only unordered but non-contiguous (eg 2, 4, 1), so this breaks some stuff
-      
-      # tests if the file is restricted. 
-      # Unfortunately this works differently for single-attachment and multi-attachment comments
-      if (is.na(comment$included$attributes$fileFormats)[1] | # 1 attchmt
-          is.null(comment$included$attributes$fileFormats[[i]])) { # &gt;1 attchmt
-        cat(paste(&quot;WARNING: attachment&quot;, i, &quot;could not be downloaded from comment &quot;,
-                  comment$data$id, &quot;, perhaps because of restrictReasonType: &quot;, 
-                  comment$included$attributes$restrictReasonType[i], &quot;\n&quot;),
-            file=&quot;log.txt&quot;, append =TRUE)
-        localAttributes$fullText &lt;- paste(localAttributes$fullText, &quot;\n\n---\n&quot;, &quot;Attachment&quot;, i, 
-                                          &quot;title:\n&quot;, comment$included$attributes$title[i], 
-                                          &quot;\n---\n&quot;, &quot;RESTRICTED (&quot;,comment$included$attributes$restrictReasonType[i], &quot;)&quot;,
-                                          sep = &quot; &quot;)
-        localAttributes$restricteds &lt;- localAttributes$restricteds + 1
-        next
-      }
-      
-      itemFormat &lt;- comment[[&quot;included&quot;]][[&quot;attributes&quot;]][[&quot;fileFormats&quot;]][[i]][[2]]
-      
-      # if the item can be downloaded in several formats, set to PDF if possible
-      if (length(itemFormat) &gt; 1) {
-        if (&quot;pdf&quot; %in% itemFormat) {
-          fi &lt;- match(&quot;pdf&quot;, itemFormat)
-          itemFormat &lt;- &quot;pdf&quot;
-        } else {
-          cat(paste(&quot;multiple formats, but none PDF; comment:&quot;, comment$data$id, &quot;attachment: &quot;, i, &quot;\n&quot;), 
-              file=&quot;log.txt&quot;, append =TRUE)
-          fi &lt;- 1
-        }
-        itemFormat &lt;- comment[[&quot;included&quot;]][[&quot;attributes&quot;]][[&quot;fileFormats&quot;]][[i]][[2]][[fi]]
-      } else {fi &lt;- 1}
-      
-      
-      
-      # Warn the user if the file is not marked as an attachment or is not a pdf
-      if (comment$included$type[i] != &quot;attachments&quot;) {
-        cat(paste0(&quot;WARNING, item &quot;, i, &quot;'s type in comment &quot;, comment$data$id,
-                   &quot; is not 'attachments' but&quot;, comment$included$type, &quot;\n&quot;), 
-            file=&quot;log.txt&quot;, append =TRUE)
-        localAttributes$nonPdfs &lt;- localAttributes$nonPdfs + 1
-      }
-      
-      # target the directory, filename, and extension
-      # to avoid path errors, slashes (&quot;/&quot;) in the title are replaced with hyphens (&quot;-&quot;)
-      j &lt;- comment$included$attributes$docOrder[i]
-      title &lt;- paste0(sprintf(&quot;a%02d &quot;, j),
-                      gsub(&quot;/&quot;, &quot;-&quot;, comment$included$attributes$title[i]))
-      if (nchar(title) &gt; 64) {title &lt;- substr(title, 1, 64)}
-      filename &lt;- paste0(title, &quot;.&quot;, itemFormat)
-      destpath &lt;- paste(destdir, commentDir, filename, sep = &quot;/&quot;)
-      
-      # print(paste0(&quot;found &quot;, filename, &quot; an &quot;, comment$included$type[i], &quot; with format &quot;,
-      # itemFormat))
-      
-      # download the file to the targeted path
-      download.file(comment$included$attributes$fileFormats[[i]]$fileUrl[fi], 
-                    destfile = destpath, 
-                    mode = &quot;wb&quot;)
-      
-      # Warn the user if the file is not a PDF (and add placeholder to fullText)
-      if (itemFormat != &quot;pdf&quot;) {
-        cat(paste0(&quot;WARNING, item &quot;, i, &quot;'s format in comment &quot;, comment$data$id,
-                   &quot; is not 'pdf' but &quot;, itemFormat, &quot;\n&quot;), file=&quot;log.txt&quot;, append =TRUE)
-        localAttributes$fullText &lt;- paste(localAttributes$fullText, &quot;\n\n---\n&quot;, &quot;Attachment&quot;, i, 
-                                          &quot;title:\n&quot;, comment$included$attributes$title[i],
-                                          &quot;\n---\n\n&quot;, &quot;UNPARSED &quot;, itemFormat, sep = &quot; &quot;)
-      } # Otherwise, download the PDF and grab the text 
-      else {
-        attachmentText &lt;- paste(pdf_text(destpath), collapse = &quot;&quot;, sep = &quot;/n&quot;)
-        
-        localAttributes$fullText &lt;- paste(localAttributes$fullText, &quot;\n\n---\n&quot;, &quot;Attachment&quot;, j, &quot;title:\n&quot;,
-                          comment$included$attributes$title[i], &quot;\n---\n\n&quot;, 
-                          attachmentText, sep = &quot; &quot;)
-        if (title == &quot;Comment&quot;) {
-          localAttributes$coverAndComment &lt;- paste(localAttributes$coverAndComment, &quot;\n\n---- Comment.pdf ----\n\n&quot;,
-                                                   attachmentText)
-        }
-        
-      }
-      
-    }
-    # TODO: combine all downloaded files into one big file - but idk if that's needed rn
-    # TODO: consider simply write the new text to a file progressively (r/t storing as a string)
-    #       (if so fullText can be a path if you want to do searching later)
-    # TODO: fix so docs are downloaded/appended to .txt in order by the $docOrder list in $included$attributes
+  fileList &lt;- list.files(path = pathPrefix)
+  # message(paste(fileList, sep = &quot; &quot;))
+  
+  attachmentList &lt;- fileList[!grepl(&quot;fullText\\.txt&quot;, fileList)]
+  commentPdf &lt;- attachmentList[grepl(&quot;a\\d\\d_Comment\\.pdf&quot;, attachmentList)]
+  if (length(commentPdf)) {
+    commentPdfText &lt;- paste(pdf_text(paste(pathPrefix, commentPdf, sep = &quot;/&quot;)), 
+                            collapse = &quot;&quot;, sep = &quot;/n&quot;)
+    cat(&quot;\n\n---\nAttached Comment:\n---\n\n&quot;, commentPdfText, file = textFName, append = TRUE)    
   }
+  localAttributes$coverAndComment &lt;- readChar(textFName, file.info(textFName)$size)
+  # message(&quot;added Comment.pdf (if any)\n&quot;)
+  # add a list of non-parsed attachments
+  
+  nonPdfs &lt;- attachmentList[!grepl(&quot;*\\.pdf&quot;, attachmentList)]
+  if (length(nonPdfs)) {
+    cat(&quot;\n\n---\nCould not parse:&quot;, nonPdfs, sep = &quot;\n&quot;, file = textFName, append = TRUE)
+    message(paste(&quot;WARNING: found&quot;, length(nonPdfs), &quot;unparseable files:\n&quot;, 
+                  paste(nonPdfs, sep = &quot;\n&quot;)))
+  }
+  localAttributes$nonPdfs &lt;- length(nonPdfs)
+  # message(localAttributes$nonPdfs, &quot;non-PDF files\n&quot;)
+  
+  # add a list of restricted attachments
+  
+  restrictedStatus &lt;- comment$included$attributes$restrictReasonType
+  names(restrictedStatus) &lt;- comment$included$attributes$title
+  restricted &lt;- restrictedStatus[!is.na(restrictedStatus)]
+  if (length(restricted)) {
+    cat(&quot;\n\n---\nRestricted files:\n&quot;, restricted, file = textFName, append = TRUE)
+    message(&quot;WARNING: found &quot;, length(restricted), &quot; restricted files:&quot;)
+    for (i in 1:length(restricted)) {
+      cat(names(restricted)[i], &quot;: &quot;, restricted[i], &quot;\n&quot;, file = textFName, append = TRUE)
+    }
+  }
+  localAttributes$restricteds &lt;- length(restricted)
+  # message(length(restricted), &quot; restricted files\n&quot;)
 
-  textFName &lt;- paste(destdir, commentDir, &quot;fullText.txt&quot;, sep = &quot;/&quot;)
-  cat(localAttributes$fullText, file = textFName, append = FALSE)
-
+  # add the text of other attachments
+  allPdfs &lt;- attachmentList[grepl(&quot;*\\.pdf&quot;, attachmentList)]
+  otherPdfs &lt;- allPdfs[!grepl(&quot;a\\d\\d_Comment\\.pdf&quot;, allPdfs)]
+  for (f in otherPdfs) {
+    attachmentText &lt;- paste(pdf_text(paste(pathPrefix, f, sep = &quot;/&quot;)), collapse = &quot;&quot;, sep = &quot;/n&quot;)
+    j &lt;- substr(f, 2, 3)
+    title &lt;- substr(f, 5, nchar(f) - 4)
+    cat(&quot;\n\n---\n&quot;, &quot;Attachment&quot;, j, &quot;title:\n&quot;, title, &quot;\n---\n\n&quot;, attachmentText, 
+        file = textFName, append = TRUE)
+  }
+  # message(length(otherPdfs), &quot; other PDFs added\n&quot;)
+  
+  localAttributes$fullText &lt;- readChar(textFName, file.info(textFName)$size)
   
   return(localAttributes)
 } 
 
 testDownload &lt;- function(id) {
   comment &lt;- getCommentById(id)
-  getAttachmentDetails(comment)
-  return(comment)
+  localAtts &lt;- getAttachmentDetails(comment)
+  return(c(localAtts, comment))
 } 
 
 
@@ -708,33 +784,6 @@ if (demo) {
 </div>
 <div id="putting-it-together" class="section level1">
 <h1>Putting it together</h1>
-<div id="helper-functions" class="section level2">
-<h2>Helper functions</h2>
-<p>Before we finally run the request, a few helper functions help us log which comments have been downloaded and put all the comments together into a data frame.</p>
-<pre class="r"><code># nullToNA replaces NULL elements of a list with NA
-nullToNA &lt;- function(x) {
-  x[sapply(x, is.null)] &lt;- NA
-  return(x)
-}
-
-# slug takes a string with at least one hyphen and extracts everything after the last hyphen
-# so for a comment's ID EPA-HQ-OA-2018-0259-####(#), it would extract the suffixed numbers
-# other agencies may have other ID formats, but &quot;everything after last hyphen&quot; seems like a decent slug for most dockets
-slug &lt;- function(id) {
-  numSegments &lt;- str_count(id, &quot;-&quot;) + 1
-  return(word(id, numSegments, sep = &quot;-&quot;))
-}
-
-# fixTimeString takes the time in the form yyyy-mm-ddThh:mm:ssZ (as the API gives it) 
-# and returns yyyy-mm-dd hh:mm:ss (in Eastern Time) (as the API demands). 
-# Note that in URLs the space must be replaced with &quot;%20&quot;; eg in getPageOfComments() 
-fixTimeString &lt;- function(yyyymmddThhmmssZ) {
-  last_mod_UTC &lt;- as.POSIXct(sub(&quot;T&quot;, &quot; &quot;, yyyymmddThhmmssZ), tz = &quot;UTC&quot;)
-  last_mod &lt;- sub(&quot; E*T&quot;, &quot;&quot;, lubridate::with_tz(last_mod_UTC,
-                                                 &quot;America/New_York&quot;))
-  return(last_mod)
-}</code></pre>
-</div>
 <div id="page-by-page-and-batch-by-batch" class="section level2">
 <h2>Page by page and batch by batch</h2>
 <p>The below uses nested loops in the form:</p>
@@ -742,512 +791,1147 @@ fixTimeString &lt;- function(yyyymmddThhmmssZ) {
 <p><code>for (each page in a batch) {</code></p>
 <p><code>for (each comment on a page) {do stuff}}}}</code></p>
 <p>to add comments one by one to a data frame that carries their <code>attributes</code>, both those pulled from the comment itself and from the getAttachmentDetails() function.</p>
-<pre><code>## PDF error: Invalid Font Weight
-## PDF error: Invalid Font Weight
-## PDF error: Invalid Font Weight
-## PDF error: Invalid Font Weight
-## PDF error: Invalid Font Weight
-## PDF error: Invalid Font Weight
-## PDF error: Invalid Font Weight
-## PDF error: Invalid Font Weight
-## PDF error: Invalid Font Weight
-## PDF error: Invalid Font Weight
-## PDF error: Invalid Font Weight
-## PDF error: Invalid Font Weight
-## PDF error: Invalid Font Weight
-## PDF error: Invalid Font Weight
-## PDF error: Invalid Font Weight
-## PDF error: Invalid Font Weight
-## PDF error: Invalid Font Weight
-## PDF error: Invalid Font Weight
-## PDF error: Invalid Font Weight
-## PDF error: Invalid Font Weight
-## PDF error: Invalid Font Weight
-## PDF error: Invalid Font Weight
-## PDF error: Invalid Font Weight
-## PDF error: Invalid Font Weight
-## PDF error: Invalid Font Weight
-## PDF error: Invalid Font Weight
-## PDF error: Invalid Font Weight
-## PDF error: Invalid Font Weight
-## PDF error: Invalid Font Weight
-## PDF error: Invalid Font Weight
-## PDF error: Invalid Font Weight
-## PDF error: Invalid Font Weight
-## PDF error: Invalid Font Weight
-## PDF error: Invalid Font Weight
-## PDF error: Invalid Font Weight
-## PDF error: Invalid Font Weight
-## PDF error: Invalid Font Weight
-## PDF error: Invalid Font Weight
-## PDF error: Invalid Font Weight
-## PDF error: Invalid Font Weight
-## PDF error: Invalid Font Weight
-## PDF error: Invalid Font Weight
-## PDF error: Invalid Font Weight
-## PDF error: Invalid Font Weight
-## PDF error: Invalid Font Weight
-## PDF error: Invalid Font Weight
-## PDF error: Invalid Font Weight
-## PDF error: Invalid Font Weight
-## PDF error: Invalid Font Weight
-## PDF error: Invalid Font Weight
-## PDF error: Invalid Font Weight
-## PDF error: Invalid Font Weight
-## PDF error: Invalid Font Weight
-## PDF error: Invalid Font Weight
-## PDF error: Invalid Font Weight
-## PDF error: Invalid Font Weight
-## PDF error: Invalid Font Weight
-## PDF error: Invalid Font Weight
-## PDF error: Invalid Font Weight
-## PDF error: Invalid Font Weight
-## PDF error: Invalid Font Weight
-## PDF error: Invalid Font Weight
-## PDF error: Invalid Font Weight
-## PDF error: Invalid Font Weight
-## PDF error: Invalid Font Weight
-## PDF error: Invalid Font Weight
-## PDF error: Invalid Font Weight
-## PDF error: Invalid Font Weight
-## PDF error: Invalid Font Weight
-## PDF error: Invalid Font Weight
-## PDF error: Invalid Font Weight
-## PDF error: Invalid Font Weight
-## PDF error: Invalid Font Weight
-## PDF error: Invalid Font Weight
-## PDF error: Invalid Font Weight
-## PDF error: Invalid Font Weight
-## PDF error: Invalid Font Weight
-## PDF error: Invalid Font Weight
-## PDF error: Invalid Font Weight
-## PDF error: Invalid Font Weight
-## PDF error: Invalid Font Weight
-## PDF error: Invalid Font Weight
-## PDF error: Invalid Font Weight
-## PDF error: Invalid Font Weight
-## PDF error: Invalid Font Weight
-## PDF error: Invalid Font Weight
-## PDF error: Invalid Font Weight
-## PDF error: Invalid Font Weight
-## PDF error: Invalid Font Weight
-## PDF error: Invalid Font Weight
-## PDF error: Invalid Font Weight
-## PDF error: Invalid Font Weight
-## PDF error: Invalid Font Weight
-## PDF error: Invalid Font Weight
-## PDF error: Invalid Font Weight
-## PDF error: Invalid Font Weight
-## PDF error: Invalid Font Weight
-## PDF error: Invalid Font Weight
-## PDF error: Invalid Font Weight
-## PDF error: Invalid Font Weight
-## PDF error: Invalid Font Weight
-## PDF error: Invalid Font Weight
-## PDF error: Invalid Font Weight
-## PDF error: Invalid Font Weight
-## PDF error: Invalid Font Weight
-## PDF error: Invalid Font Weight
-## PDF error: Invalid Font Weight
-## PDF error: Invalid Font Weight
-## PDF error: Invalid Font Weight
-## PDF error: Invalid Font Weight
-## PDF error: Invalid Font Weight
-## PDF error: Invalid Font Weight
-## PDF error: Invalid Font Weight
-## PDF error: Invalid Font Weight
-## PDF error: Invalid Font Weight
-## PDF error: Invalid Font Weight
-## PDF error: Invalid Font Weight
-## PDF error: Invalid Font Weight
-## PDF error: Invalid Font Weight
-## PDF error: Invalid Font Weight
-## PDF error: Invalid Font Weight
-## PDF error: Invalid Font Weight
-## PDF error: Invalid Font Weight
-## PDF error: Invalid Font Weight
-## PDF error: Invalid Font Weight
-## PDF error: Invalid Font Weight
-## PDF error: Invalid Font Weight
-## PDF error: Invalid Font Weight
-## PDF error: Invalid Font Weight
-## PDF error: Invalid Font Weight
-## PDF error: Invalid Font Weight
-## PDF error: Invalid Font Weight
-## PDF error: Invalid Font Weight
-## PDF error: Invalid Font Weight
-## PDF error: Invalid Font Weight
-## PDF error: Invalid Font Weight
-## PDF error: Invalid Font Weight
-## PDF error: Invalid Font Weight
-## PDF error: Invalid Font Weight</code></pre>
-<pre><code>## PDF error: not an ICC profile, invalid signature</code></pre>
-<pre><code>## PDF error: read ICCBased color space profile error</code></pre>
-<pre><code>## PDF error: not an ICC profile, invalid signature</code></pre>
-<pre><code>## PDF error: read ICCBased color space profile error</code></pre>
-<pre><code>## PDF error: not an ICC profile, invalid signature</code></pre>
-<pre><code>## PDF error: read ICCBased color space profile error</code></pre>
-<pre><code>## PDF error: not an ICC profile, invalid signature</code></pre>
-<pre><code>## PDF error: read ICCBased color space profile error</code></pre>
-<pre><code>## PDF error: not an ICC profile, invalid signature</code></pre>
-<pre><code>## PDF error: read ICCBased color space profile error</code></pre>
-<pre><code>## PDF error: not an ICC profile, invalid signature</code></pre>
-<pre><code>## PDF error: read ICCBased color space profile error</code></pre>
-<pre><code>## PDF error: not an ICC profile, invalid signature</code></pre>
-<pre><code>## PDF error: read ICCBased color space profile error</code></pre>
-<pre><code>## PDF error: not an ICC profile, invalid signature</code></pre>
-<pre><code>## PDF error: read ICCBased color space profile error</code></pre>
-<pre><code>## PDF error: not an ICC profile, invalid signature</code></pre>
-<pre><code>## PDF error: read ICCBased color space profile error</code></pre>
-<pre><code>## PDF error: not an ICC profile, invalid signature</code></pre>
-<pre><code>## PDF error: read ICCBased color space profile error</code></pre>
-<pre><code>## PDF error: not an ICC profile, invalid signature</code></pre>
-<pre><code>## PDF error: read ICCBased color space profile error</code></pre>
-<pre><code>## PDF error: not an ICC profile, invalid signature</code></pre>
-<pre><code>## PDF error: read ICCBased color space profile error</code></pre>
-<pre><code>## PDF error: not an ICC profile, invalid signature</code></pre>
-<pre><code>## PDF error: read ICCBased color space profile error</code></pre>
-<pre><code>## PDF error: not an ICC profile, invalid signature</code></pre>
-<pre><code>## PDF error: read ICCBased color space profile error</code></pre>
-<pre><code>## PDF error: not an ICC profile, invalid signature</code></pre>
-<pre><code>## PDF error: read ICCBased color space profile error</code></pre>
-<pre><code>## PDF error: not an ICC profile, invalid signature</code></pre>
-<pre><code>## PDF error: read ICCBased color space profile error</code></pre>
-<pre><code>## PDF error: not an ICC profile, invalid signature</code></pre>
-<pre><code>## PDF error: read ICCBased color space profile error</code></pre>
-<pre><code>## PDF error: not an ICC profile, invalid signature</code></pre>
-<pre><code>## PDF error: read ICCBased color space profile error</code></pre>
-<pre><code>## PDF error: not an ICC profile, invalid signature</code></pre>
-<pre><code>## PDF error: read ICCBased color space profile error</code></pre>
-<pre><code>## PDF error: not an ICC profile, invalid signature</code></pre>
-<pre><code>## PDF error: read ICCBased color space profile error</code></pre>
-<pre><code>## PDF error: not an ICC profile, invalid signature</code></pre>
-<pre><code>## PDF error: read ICCBased color space profile error</code></pre>
-<pre><code>## PDF error: not an ICC profile, invalid signature</code></pre>
-<pre><code>## PDF error: read ICCBased color space profile error</code></pre>
-<pre><code>## PDF error: not an ICC profile, invalid signature</code></pre>
-<pre><code>## PDF error: read ICCBased color space profile error</code></pre>
-<pre><code>## PDF error: not an ICC profile, invalid signature</code></pre>
-<pre><code>## PDF error: read ICCBased color space profile error</code></pre>
-<pre><code>## PDF error: not an ICC profile, invalid signature</code></pre>
-<pre><code>## PDF error: read ICCBased color space profile error</code></pre>
-<pre><code>## PDF error: not an ICC profile, invalid signature</code></pre>
-<pre><code>## PDF error: read ICCBased color space profile error</code></pre>
-<pre><code>## PDF error: not an ICC profile, invalid signature</code></pre>
-<pre><code>## PDF error: read ICCBased color space profile error</code></pre>
-<pre><code>## PDF error: not an ICC profile, invalid signature</code></pre>
-<pre><code>## PDF error: read ICCBased color space profile error</code></pre>
-<pre><code>## PDF error: not an ICC profile, invalid signature</code></pre>
-<pre><code>## PDF error: read ICCBased color space profile error</code></pre>
-<pre><code>## PDF error: not an ICC profile, invalid signature</code></pre>
-<pre><code>## PDF error: read ICCBased color space profile error</code></pre>
-<pre><code>## PDF error: not an ICC profile, invalid signature</code></pre>
-<pre><code>## PDF error: read ICCBased color space profile error</code></pre>
-<pre><code>## PDF error: not an ICC profile, invalid signature</code></pre>
-<pre><code>## PDF error: read ICCBased color space profile error</code></pre>
-<pre><code>## PDF error: not an ICC profile, invalid signature</code></pre>
-<pre><code>## PDF error: read ICCBased color space profile error</code></pre>
-<pre><code>## PDF error: not an ICC profile, invalid signature</code></pre>
-<pre><code>## PDF error: read ICCBased color space profile error</code></pre>
-<pre><code>## PDF error: not an ICC profile, invalid signature</code></pre>
-<pre><code>## PDF error: read ICCBased color space profile error</code></pre>
-<pre><code>## PDF error: not an ICC profile, invalid signature</code></pre>
-<pre><code>## PDF error: read ICCBased color space profile error</code></pre>
-<pre><code>## PDF error: not an ICC profile, invalid signature</code></pre>
-<pre><code>## PDF error: read ICCBased color space profile error</code></pre>
-<pre><code>## PDF error: not an ICC profile, invalid signature</code></pre>
-<pre><code>## PDF error: read ICCBased color space profile error</code></pre>
-<pre><code>## PDF error: not an ICC profile, invalid signature</code></pre>
-<pre><code>## PDF error: read ICCBased color space profile error</code></pre>
-<pre><code>## PDF error: not an ICC profile, invalid signature</code></pre>
-<pre><code>## PDF error: read ICCBased color space profile error</code></pre>
-<pre><code>## PDF error: not an ICC profile, invalid signature</code></pre>
-<pre><code>## PDF error: read ICCBased color space profile error</code></pre>
-<pre><code>## PDF error: not an ICC profile, invalid signature</code></pre>
-<pre><code>## PDF error: read ICCBased color space profile error</code></pre>
-<pre><code>## PDF error: not an ICC profile, invalid signature</code></pre>
-<pre><code>## PDF error: read ICCBased color space profile error</code></pre>
-<pre><code>## PDF error: not an ICC profile, invalid signature</code></pre>
-<pre><code>## PDF error: read ICCBased color space profile error</code></pre>
-<pre><code>## PDF error: not an ICC profile, invalid signature</code></pre>
-<pre><code>## PDF error: read ICCBased color space profile error</code></pre>
-<pre><code>## PDF error: not an ICC profile, invalid signature</code></pre>
-<pre><code>## PDF error: read ICCBased color space profile error</code></pre>
-<pre><code>## PDF error: not an ICC profile, invalid signature</code></pre>
-<pre><code>## PDF error: read ICCBased color space profile error</code></pre>
-<pre><code>## PDF error: not an ICC profile, invalid signature</code></pre>
-<pre><code>## PDF error: read ICCBased color space profile error</code></pre>
-<pre><code>## PDF error: not an ICC profile, invalid signature</code></pre>
-<pre><code>## PDF error: read ICCBased color space profile error</code></pre>
-<pre><code>## PDF error: not an ICC profile, invalid signature</code></pre>
-<pre><code>## PDF error: read ICCBased color space profile error</code></pre>
-<pre><code>## PDF error: not an ICC profile, invalid signature</code></pre>
-<pre><code>## PDF error: read ICCBased color space profile error</code></pre>
-<pre><code>## PDF error: not an ICC profile, invalid signature</code></pre>
-<pre><code>## PDF error: read ICCBased color space profile error</code></pre>
-<pre><code>## PDF error: not an ICC profile, invalid signature</code></pre>
-<pre><code>## PDF error: read ICCBased color space profile error</code></pre>
-<pre><code>## PDF error: not an ICC profile, invalid signature</code></pre>
-<pre><code>## PDF error: read ICCBased color space profile error</code></pre>
-<pre><code>## PDF error: not an ICC profile, invalid signature</code></pre>
-<pre><code>## PDF error: read ICCBased color space profile error</code></pre>
-<pre><code>## PDF error: not an ICC profile, invalid signature</code></pre>
-<pre><code>## PDF error: read ICCBased color space profile error</code></pre>
-<pre><code>## PDF error: not an ICC profile, invalid signature</code></pre>
-<pre><code>## PDF error: read ICCBased color space profile error</code></pre>
-<pre><code>## PDF error: not an ICC profile, invalid signature</code></pre>
-<pre><code>## PDF error: read ICCBased color space profile error</code></pre>
-<pre><code>## PDF error: not an ICC profile, invalid signature</code></pre>
-<pre><code>## PDF error: read ICCBased color space profile error</code></pre>
-<pre><code>## PDF error: not an ICC profile, invalid signature</code></pre>
-<pre><code>## PDF error: read ICCBased color space profile error</code></pre>
-<pre><code>## PDF error: not an ICC profile, invalid signature</code></pre>
-<pre><code>## PDF error: read ICCBased color space profile error</code></pre>
-<pre><code>## PDF error: not an ICC profile, invalid signature</code></pre>
-<pre><code>## PDF error: read ICCBased color space profile error</code></pre>
-<pre><code>## PDF error: not an ICC profile, invalid signature</code></pre>
-<pre><code>## PDF error: read ICCBased color space profile error</code></pre>
-<pre><code>## PDF error: not an ICC profile, invalid signature</code></pre>
-<pre><code>## PDF error: read ICCBased color space profile error</code></pre>
-<pre><code>## PDF error: not an ICC profile, invalid signature</code></pre>
-<pre><code>## PDF error: read ICCBased color space profile error</code></pre>
-<pre><code>## PDF error: not an ICC profile, invalid signature</code></pre>
-<pre><code>## PDF error: read ICCBased color space profile error</code></pre>
-<pre><code>## PDF error: not an ICC profile, invalid signature</code></pre>
-<pre><code>## PDF error: read ICCBased color space profile error</code></pre>
-<pre><code>## PDF error: not an ICC profile, invalid signature</code></pre>
-<pre><code>## PDF error: read ICCBased color space profile error</code></pre>
-<pre><code>## PDF error: not an ICC profile, invalid signature</code></pre>
-<pre><code>## PDF error: read ICCBased color space profile error</code></pre>
-<pre><code>## PDF error: not an ICC profile, invalid signature</code></pre>
-<pre><code>## PDF error: read ICCBased color space profile error</code></pre>
-<pre><code>## PDF error: not an ICC profile, invalid signature</code></pre>
-<pre><code>## PDF error: read ICCBased color space profile error</code></pre>
-<pre><code>## PDF error: not an ICC profile, invalid signature</code></pre>
-<pre><code>## PDF error: read ICCBased color space profile error</code></pre>
-<pre><code>## PDF error: not an ICC profile, invalid signature</code></pre>
-<pre><code>## PDF error: read ICCBased color space profile error</code></pre>
-<pre><code>## PDF error: not an ICC profile, invalid signature</code></pre>
-<pre><code>## PDF error: read ICCBased color space profile error</code></pre>
-<pre><code>## PDF error: not an ICC profile, invalid signature</code></pre>
-<pre><code>## PDF error: read ICCBased color space profile error</code></pre>
-<pre><code>## PDF error: not an ICC profile, invalid signature</code></pre>
-<pre><code>## PDF error: read ICCBased color space profile error</code></pre>
-<pre><code>## PDF error: not an ICC profile, invalid signature</code></pre>
-<pre><code>## PDF error: read ICCBased color space profile error</code></pre>
-<pre><code>## PDF error: not an ICC profile, invalid signature</code></pre>
-<pre><code>## PDF error: read ICCBased color space profile error</code></pre>
-<pre><code>## PDF error: not an ICC profile, invalid signature</code></pre>
-<pre><code>## PDF error: read ICCBased color space profile error</code></pre>
-<pre><code>## PDF error: not an ICC profile, invalid signature</code></pre>
-<pre><code>## PDF error: read ICCBased color space profile error</code></pre>
-<pre><code>## PDF error: not an ICC profile, invalid signature</code></pre>
-<pre><code>## PDF error: read ICCBased color space profile error</code></pre>
-<pre><code>## PDF error: not an ICC profile, invalid signature</code></pre>
-<pre><code>## PDF error: read ICCBased color space profile error</code></pre>
-<pre><code>## PDF error: not an ICC profile, invalid signature</code></pre>
-<pre><code>## PDF error: read ICCBased color space profile error</code></pre>
-<pre><code>## PDF error: not an ICC profile, invalid signature</code></pre>
-<pre><code>## PDF error: read ICCBased color space profile error</code></pre>
-<pre><code>## PDF error: not an ICC profile, invalid signature</code></pre>
-<pre><code>## PDF error: read ICCBased color space profile error</code></pre>
-<pre><code>## PDF error: not an ICC profile, invalid signature</code></pre>
-<pre><code>## PDF error: read ICCBased color space profile error</code></pre>
-<pre><code>## PDF error: not an ICC profile, invalid signature</code></pre>
-<pre><code>## PDF error: read ICCBased color space profile error</code></pre>
-<pre><code>## PDF error: not an ICC profile, invalid signature</code></pre>
-<pre><code>## PDF error: read ICCBased color space profile error</code></pre>
-<pre><code>## PDF error: not an ICC profile, invalid signature</code></pre>
-<pre><code>## PDF error: read ICCBased color space profile error</code></pre>
-<pre><code>## PDF error: not an ICC profile, invalid signature</code></pre>
-<pre><code>## PDF error: read ICCBased color space profile error</code></pre>
-<pre><code>## PDF error: not an ICC profile, invalid signature</code></pre>
-<pre><code>## PDF error: read ICCBased color space profile error</code></pre>
-<pre><code>## PDF error: not an ICC profile, invalid signature</code></pre>
-<pre><code>## PDF error: read ICCBased color space profile error</code></pre>
-<pre><code>## PDF error: not an ICC profile, invalid signature</code></pre>
-<pre><code>## PDF error: read ICCBased color space profile error</code></pre>
-<pre><code>## PDF error: not an ICC profile, invalid signature</code></pre>
-<pre><code>## PDF error: read ICCBased color space profile error</code></pre>
-<pre><code>## PDF error: not an ICC profile, invalid signature</code></pre>
-<pre><code>## PDF error: read ICCBased color space profile error</code></pre>
-<pre><code>## PDF error: not an ICC profile, invalid signature</code></pre>
-<pre><code>## PDF error: read ICCBased color space profile error</code></pre>
-<pre><code>## PDF error: not an ICC profile, invalid signature</code></pre>
-<pre><code>## PDF error: read ICCBased color space profile error</code></pre>
-<pre><code>## PDF error: not an ICC profile, invalid signature</code></pre>
-<pre><code>## PDF error: read ICCBased color space profile error</code></pre>
-<pre><code>## PDF error: not an ICC profile, invalid signature</code></pre>
-<pre><code>## PDF error: read ICCBased color space profile error</code></pre>
-<pre><code>## PDF error: not an ICC profile, invalid signature</code></pre>
-<pre><code>## PDF error: read ICCBased color space profile error</code></pre>
-<pre><code>## PDF error: not an ICC profile, invalid signature</code></pre>
-<pre><code>## PDF error: read ICCBased color space profile error</code></pre>
-<pre><code>## PDF error: not an ICC profile, invalid signature</code></pre>
-<pre><code>## PDF error: read ICCBased color space profile error</code></pre>
-<pre><code>## PDF error: not an ICC profile, invalid signature</code></pre>
-<pre><code>## PDF error: read ICCBased color space profile error</code></pre>
-<pre><code>## PDF error: not an ICC profile, invalid signature</code></pre>
-<pre><code>## PDF error: read ICCBased color space profile error</code></pre>
-<pre><code>## PDF error: not an ICC profile, invalid signature</code></pre>
-<pre><code>## PDF error: read ICCBased color space profile error</code></pre>
-<pre><code>## PDF error: not an ICC profile, invalid signature</code></pre>
-<pre><code>## PDF error: read ICCBased color space profile error</code></pre>
-<pre><code>## PDF error: not an ICC profile, invalid signature</code></pre>
-<pre><code>## PDF error: read ICCBased color space profile error</code></pre>
-<pre><code>## PDF error: not an ICC profile, invalid signature</code></pre>
-<pre><code>## PDF error: read ICCBased color space profile error</code></pre>
-<pre><code>## PDF error: not an ICC profile, invalid signature</code></pre>
-<pre><code>## PDF error: read ICCBased color space profile error</code></pre>
-<pre><code>## PDF error: not an ICC profile, invalid signature</code></pre>
-<pre><code>## PDF error: read ICCBased color space profile error</code></pre>
-<pre><code>## PDF error: not an ICC profile, invalid signature</code></pre>
-<pre><code>## PDF error: read ICCBased color space profile error</code></pre>
-<pre><code>## PDF error: not an ICC profile, invalid signature</code></pre>
-<pre><code>## PDF error: read ICCBased color space profile error</code></pre>
-<pre><code>## PDF error: not an ICC profile, invalid signature</code></pre>
-<pre><code>## PDF error: read ICCBased color space profile error</code></pre>
-<pre><code>## PDF error: not an ICC profile, invalid signature</code></pre>
-<pre><code>## PDF error: read ICCBased color space profile error</code></pre>
-<pre><code>## PDF error: not an ICC profile, invalid signature</code></pre>
-<pre><code>## PDF error: read ICCBased color space profile error</code></pre>
-<pre><code>## PDF error: not an ICC profile, invalid signature</code></pre>
-<pre><code>## PDF error: read ICCBased color space profile error</code></pre>
-<pre><code>## PDF error: not an ICC profile, invalid signature</code></pre>
-<pre><code>## PDF error: read ICCBased color space profile error</code></pre>
-<pre><code>## PDF error: not an ICC profile, invalid signature</code></pre>
-<pre><code>## PDF error: read ICCBased color space profile error</code></pre>
-<pre><code>## PDF error: not an ICC profile, invalid signature</code></pre>
-<pre><code>## PDF error: read ICCBased color space profile error</code></pre>
-<pre><code>## PDF error: not an ICC profile, invalid signature</code></pre>
-<pre><code>## PDF error: read ICCBased color space profile error</code></pre>
-<pre><code>## PDF error: not an ICC profile, invalid signature</code></pre>
-<pre><code>## PDF error: read ICCBased color space profile error</code></pre>
-<pre><code>## PDF error: not an ICC profile, invalid signature</code></pre>
-<pre><code>## PDF error: read ICCBased color space profile error</code></pre>
-<pre><code>## PDF error: not an ICC profile, invalid signature</code></pre>
-<pre><code>## PDF error: read ICCBased color space profile error</code></pre>
-<pre><code>## PDF error: not an ICC profile, invalid signature</code></pre>
-<pre><code>## PDF error: read ICCBased color space profile error</code></pre>
-<pre><code>## PDF error: not an ICC profile, invalid signature</code></pre>
-<pre><code>## PDF error: read ICCBased color space profile error</code></pre>
-<pre><code>## PDF error: not an ICC profile, invalid signature</code></pre>
-<pre><code>## PDF error: read ICCBased color space profile error</code></pre>
-<pre><code>## PDF error: not an ICC profile, invalid signature</code></pre>
-<pre><code>## PDF error: read ICCBased color space profile error</code></pre>
-<pre><code>## PDF error: not an ICC profile, invalid signature</code></pre>
-<pre><code>## PDF error: read ICCBased color space profile error</code></pre>
-<pre><code>## PDF error: not an ICC profile, invalid signature</code></pre>
-<pre><code>## PDF error: read ICCBased color space profile error</code></pre>
-<pre><code>## PDF error: not an ICC profile, invalid signature</code></pre>
-<pre><code>## PDF error: read ICCBased color space profile error</code></pre>
-<pre><code>## PDF error: not an ICC profile, invalid signature</code></pre>
-<pre><code>## PDF error: read ICCBased color space profile error</code></pre>
-<pre><code>## PDF error: not an ICC profile, invalid signature</code></pre>
-<pre><code>## PDF error: read ICCBased color space profile error</code></pre>
-<pre><code>## PDF error: not an ICC profile, invalid signature</code></pre>
-<pre><code>## PDF error: read ICCBased color space profile error</code></pre>
-<pre><code>## PDF error: not an ICC profile, invalid signature</code></pre>
-<pre><code>## PDF error: read ICCBased color space profile error</code></pre>
-<pre><code>## PDF error: not an ICC profile, invalid signature</code></pre>
-<pre><code>## PDF error: read ICCBased color space profile error</code></pre>
-<pre><code>## PDF error: not an ICC profile, invalid signature</code></pre>
-<pre><code>## PDF error: read ICCBased color space profile error</code></pre>
-<pre><code>## PDF error: not an ICC profile, invalid signature</code></pre>
-<pre><code>## PDF error: read ICCBased color space profile error</code></pre>
-<pre><code>## PDF error: not an ICC profile, invalid signature</code></pre>
-<pre><code>## PDF error: read ICCBased color space profile error</code></pre>
-<pre><code>## PDF error: not an ICC profile, invalid signature</code></pre>
-<pre><code>## PDF error: read ICCBased color space profile error</code></pre>
-<pre><code>## PDF error: not an ICC profile, invalid signature</code></pre>
-<pre><code>## PDF error: read ICCBased color space profile error</code></pre>
-<pre><code>## PDF error: not an ICC profile, invalid signature</code></pre>
-<pre><code>## PDF error: read ICCBased color space profile error</code></pre>
-<pre><code>## PDF error: not an ICC profile, invalid signature</code></pre>
-<pre><code>## PDF error: read ICCBased color space profile error</code></pre>
-<pre><code>## PDF error: not an ICC profile, invalid signature</code></pre>
-<pre><code>## PDF error: read ICCBased color space profile error</code></pre>
-<pre><code>## PDF error: not an ICC profile, invalid signature</code></pre>
-<pre><code>## PDF error: read ICCBased color space profile error</code></pre>
-<pre><code>## PDF error: not an ICC profile, invalid signature</code></pre>
-<pre><code>## PDF error: read ICCBased color space profile error</code></pre>
-<pre><code>## PDF error: not an ICC profile, invalid signature</code></pre>
-<pre><code>## PDF error: read ICCBased color space profile error</code></pre>
-<pre><code>## PDF error: not an ICC profile, invalid signature</code></pre>
-<pre><code>## PDF error: read ICCBased color space profile error</code></pre>
-<pre><code>## PDF error: not an ICC profile, invalid signature</code></pre>
-<pre><code>## PDF error: read ICCBased color space profile error</code></pre>
-<pre><code>## PDF error: not an ICC profile, invalid signature</code></pre>
-<pre><code>## PDF error: read ICCBased color space profile error</code></pre>
-<pre><code>## PDF error: not an ICC profile, invalid signature</code></pre>
-<pre><code>## PDF error: read ICCBased color space profile error</code></pre>
-<pre><code>## PDF error: not an ICC profile, invalid signature</code></pre>
-<pre><code>## PDF error: read ICCBased color space profile error</code></pre>
-<pre><code>## PDF error: not an ICC profile, invalid signature</code></pre>
-<pre><code>## PDF error: read ICCBased color space profile error</code></pre>
-<pre><code>## PDF error: not an ICC profile, invalid signature</code></pre>
-<pre><code>## PDF error: read ICCBased color space profile error</code></pre>
-<pre><code>## PDF error: Invalid Font Weight</code></pre>
-<pre><code>## PDF error: Could not parse ligature component &quot;127&quot; of &quot;_127&quot; in parseCharName</code></pre>
-<pre><code>## PDF error: Could not parse ligature component &quot;128&quot; of &quot;_128&quot; in parseCharName</code></pre>
-<pre><code>## PDF error: Could not parse ligature component &quot;129&quot; of &quot;_129&quot; in parseCharName</code></pre>
-<pre><code>## PDF error: Could not parse ligature component &quot;141&quot; of &quot;_141&quot; in parseCharName</code></pre>
-<pre><code>## PDF error: Could not parse ligature component &quot;127&quot; of &quot;_127&quot; in parseCharName</code></pre>
-<pre><code>## PDF error: Could not parse ligature component &quot;128&quot; of &quot;_128&quot; in parseCharName</code></pre>
-<pre><code>## PDF error: Could not parse ligature component &quot;129&quot; of &quot;_129&quot; in parseCharName</code></pre>
-<pre><code>## PDF error: Could not parse ligature component &quot;141&quot; of &quot;_141&quot; in parseCharName</code></pre>
-<pre><code>## PDF error: Unknown operator 'ing'</code></pre>
-<pre><code>## PDF error: Invalid Font Weight
-## PDF error: Invalid Font Weight
-## PDF error: Invalid Font Weight
-## PDF error: Invalid Font Weight
-## PDF error: Invalid Font Weight
-## PDF error: Invalid Font Weight
-## PDF error: Invalid Font Weight
-## PDF error: Invalid Font Weight
-## PDF error: Invalid Font Weight
-## PDF error: Invalid Font Weight
-## PDF error: Invalid Font Weight
-## PDF error: Invalid Font Weight
-## PDF error: Invalid Font Weight
-## PDF error: Invalid Font Weight
-## PDF error: Invalid Font Weight
-## PDF error: Invalid Font Weight
-## PDF error: Invalid Font Weight
-## PDF error: Invalid Font Weight
-## PDF error: Invalid Font Weight
-## PDF error: Invalid Font Weight
-## PDF error: Invalid Font Weight
-## PDF error: Invalid Font Weight
-## PDF error: Invalid Font Weight
-## PDF error: Invalid Font Weight
-## PDF error: Invalid Font Weight
-## PDF error: Invalid Font Weight
-## PDF error: Invalid Font Weight
-## PDF error: Invalid Font Weight
-## PDF error: Invalid Font Weight
-## PDF error: Invalid Font Weight
-## PDF error: Invalid Font Weight</code></pre>
+<pre><code>## Warning in commentList[commentsAdded] &lt;- comment: number of items to replace is
+## not a multiple of replacement length
+
+## Warning in commentList[commentsAdded] &lt;- comment: number of items to replace is
+## not a multiple of replacement length
+
+## Warning in commentList[commentsAdded] &lt;- comment: number of items to replace is
+## not a multiple of replacement length
+
+## Warning in commentList[commentsAdded] &lt;- comment: number of items to replace is
+## not a multiple of replacement length
+
+## Warning in commentList[commentsAdded] &lt;- comment: number of items to replace is
+## not a multiple of replacement length
+
+## Warning in commentList[commentsAdded] &lt;- comment: number of items to replace is
+## not a multiple of replacement length
+
+## Warning in commentList[commentsAdded] &lt;- comment: number of items to replace is
+## not a multiple of replacement length
+
+## Warning in commentList[commentsAdded] &lt;- comment: number of items to replace is
+## not a multiple of replacement length
+
+## Warning in commentList[commentsAdded] &lt;- comment: number of items to replace is
+## not a multiple of replacement length
+
+## Warning in commentList[commentsAdded] &lt;- comment: number of items to replace is
+## not a multiple of replacement length
+
+## Warning in commentList[commentsAdded] &lt;- comment: number of items to replace is
+## not a multiple of replacement length
+
+## Warning in commentList[commentsAdded] &lt;- comment: number of items to replace is
+## not a multiple of replacement length
+
+## Warning in commentList[commentsAdded] &lt;- comment: number of items to replace is
+## not a multiple of replacement length
+
+## Warning in commentList[commentsAdded] &lt;- comment: number of items to replace is
+## not a multiple of replacement length
+
+## Warning in commentList[commentsAdded] &lt;- comment: number of items to replace is
+## not a multiple of replacement length
+
+## Warning in commentList[commentsAdded] &lt;- comment: number of items to replace is
+## not a multiple of replacement length
+
+## Warning in commentList[commentsAdded] &lt;- comment: number of items to replace is
+## not a multiple of replacement length
+
+## Warning in commentList[commentsAdded] &lt;- comment: number of items to replace is
+## not a multiple of replacement length
+
+## Warning in commentList[commentsAdded] &lt;- comment: number of items to replace is
+## not a multiple of replacement length
+
+## Warning in commentList[commentsAdded] &lt;- comment: number of items to replace is
+## not a multiple of replacement length
+
+## Warning in commentList[commentsAdded] &lt;- comment: number of items to replace is
+## not a multiple of replacement length
+
+## Warning in commentList[commentsAdded] &lt;- comment: number of items to replace is
+## not a multiple of replacement length
+
+## Warning in commentList[commentsAdded] &lt;- comment: number of items to replace is
+## not a multiple of replacement length
+
+## Warning in commentList[commentsAdded] &lt;- comment: number of items to replace is
+## not a multiple of replacement length
+
+## Warning in commentList[commentsAdded] &lt;- comment: number of items to replace is
+## not a multiple of replacement length
+
+## Warning in commentList[commentsAdded] &lt;- comment: number of items to replace is
+## not a multiple of replacement length
+
+## Warning in commentList[commentsAdded] &lt;- comment: number of items to replace is
+## not a multiple of replacement length
+
+## Warning in commentList[commentsAdded] &lt;- comment: number of items to replace is
+## not a multiple of replacement length
+
+## Warning in commentList[commentsAdded] &lt;- comment: number of items to replace is
+## not a multiple of replacement length
+
+## Warning in commentList[commentsAdded] &lt;- comment: number of items to replace is
+## not a multiple of replacement length
+
+## Warning in commentList[commentsAdded] &lt;- comment: number of items to replace is
+## not a multiple of replacement length
+
+## Warning in commentList[commentsAdded] &lt;- comment: number of items to replace is
+## not a multiple of replacement length
+
+## Warning in commentList[commentsAdded] &lt;- comment: number of items to replace is
+## not a multiple of replacement length
+
+## Warning in commentList[commentsAdded] &lt;- comment: number of items to replace is
+## not a multiple of replacement length
+
+## Warning in commentList[commentsAdded] &lt;- comment: number of items to replace is
+## not a multiple of replacement length
+
+## Warning in commentList[commentsAdded] &lt;- comment: number of items to replace is
+## not a multiple of replacement length
+
+## Warning in commentList[commentsAdded] &lt;- comment: number of items to replace is
+## not a multiple of replacement length
+
+## Warning in commentList[commentsAdded] &lt;- comment: number of items to replace is
+## not a multiple of replacement length
+
+## Warning in commentList[commentsAdded] &lt;- comment: number of items to replace is
+## not a multiple of replacement length
+
+## Warning in commentList[commentsAdded] &lt;- comment: number of items to replace is
+## not a multiple of replacement length
+
+## Warning in commentList[commentsAdded] &lt;- comment: number of items to replace is
+## not a multiple of replacement length
+
+## Warning in commentList[commentsAdded] &lt;- comment: number of items to replace is
+## not a multiple of replacement length
+
+## Warning in commentList[commentsAdded] &lt;- comment: number of items to replace is
+## not a multiple of replacement length
+
+## Warning in commentList[commentsAdded] &lt;- comment: number of items to replace is
+## not a multiple of replacement length
+
+## Warning in commentList[commentsAdded] &lt;- comment: number of items to replace is
+## not a multiple of replacement length
+
+## Warning in commentList[commentsAdded] &lt;- comment: number of items to replace is
+## not a multiple of replacement length
+
+## Warning in commentList[commentsAdded] &lt;- comment: number of items to replace is
+## not a multiple of replacement length
+
+## Warning in commentList[commentsAdded] &lt;- comment: number of items to replace is
+## not a multiple of replacement length
+
+## Warning in commentList[commentsAdded] &lt;- comment: number of items to replace is
+## not a multiple of replacement length
+
+## Warning in commentList[commentsAdded] &lt;- comment: number of items to replace is
+## not a multiple of replacement length
+
+## Warning in commentList[commentsAdded] &lt;- comment: number of items to replace is
+## not a multiple of replacement length
+
+## Warning in commentList[commentsAdded] &lt;- comment: number of items to replace is
+## not a multiple of replacement length
+
+## Warning in commentList[commentsAdded] &lt;- comment: number of items to replace is
+## not a multiple of replacement length
+
+## Warning in commentList[commentsAdded] &lt;- comment: number of items to replace is
+## not a multiple of replacement length
+
+## Warning in commentList[commentsAdded] &lt;- comment: number of items to replace is
+## not a multiple of replacement length
+
+## Warning in commentList[commentsAdded] &lt;- comment: number of items to replace is
+## not a multiple of replacement length
+
+## Warning in commentList[commentsAdded] &lt;- comment: number of items to replace is
+## not a multiple of replacement length
+
+## Warning in commentList[commentsAdded] &lt;- comment: number of items to replace is
+## not a multiple of replacement length
+
+## Warning in commentList[commentsAdded] &lt;- comment: number of items to replace is
+## not a multiple of replacement length
+
+## Warning in commentList[commentsAdded] &lt;- comment: number of items to replace is
+## not a multiple of replacement length
+
+## Warning in commentList[commentsAdded] &lt;- comment: number of items to replace is
+## not a multiple of replacement length
+
+## Warning in commentList[commentsAdded] &lt;- comment: number of items to replace is
+## not a multiple of replacement length
+
+## Warning in commentList[commentsAdded] &lt;- comment: number of items to replace is
+## not a multiple of replacement length
+
+## Warning in commentList[commentsAdded] &lt;- comment: number of items to replace is
+## not a multiple of replacement length
+
+## Warning in commentList[commentsAdded] &lt;- comment: number of items to replace is
+## not a multiple of replacement length
+
+## Warning in commentList[commentsAdded] &lt;- comment: number of items to replace is
+## not a multiple of replacement length
+
+## Warning in commentList[commentsAdded] &lt;- comment: number of items to replace is
+## not a multiple of replacement length
+
+## Warning in commentList[commentsAdded] &lt;- comment: number of items to replace is
+## not a multiple of replacement length
+
+## Warning in commentList[commentsAdded] &lt;- comment: number of items to replace is
+## not a multiple of replacement length
+
+## Warning in commentList[commentsAdded] &lt;- comment: number of items to replace is
+## not a multiple of replacement length
+
+## Warning in commentList[commentsAdded] &lt;- comment: number of items to replace is
+## not a multiple of replacement length
+
+## Warning in commentList[commentsAdded] &lt;- comment: number of items to replace is
+## not a multiple of replacement length
+
+## Warning in commentList[commentsAdded] &lt;- comment: number of items to replace is
+## not a multiple of replacement length
+
+## Warning in commentList[commentsAdded] &lt;- comment: number of items to replace is
+## not a multiple of replacement length
+
+## Warning in commentList[commentsAdded] &lt;- comment: number of items to replace is
+## not a multiple of replacement length
+
+## Warning in commentList[commentsAdded] &lt;- comment: number of items to replace is
+## not a multiple of replacement length
+
+## Warning in commentList[commentsAdded] &lt;- comment: number of items to replace is
+## not a multiple of replacement length
+
+## Warning in commentList[commentsAdded] &lt;- comment: number of items to replace is
+## not a multiple of replacement length
+
+## Warning in commentList[commentsAdded] &lt;- comment: number of items to replace is
+## not a multiple of replacement length
+
+## Warning in commentList[commentsAdded] &lt;- comment: number of items to replace is
+## not a multiple of replacement length
+
+## Warning in commentList[commentsAdded] &lt;- comment: number of items to replace is
+## not a multiple of replacement length
+
+## Warning in commentList[commentsAdded] &lt;- comment: number of items to replace is
+## not a multiple of replacement length
+
+## Warning in commentList[commentsAdded] &lt;- comment: number of items to replace is
+## not a multiple of replacement length
+
+## Warning in commentList[commentsAdded] &lt;- comment: number of items to replace is
+## not a multiple of replacement length
+
+## Warning in commentList[commentsAdded] &lt;- comment: number of items to replace is
+## not a multiple of replacement length
+
+## Warning in commentList[commentsAdded] &lt;- comment: number of items to replace is
+## not a multiple of replacement length
+
+## Warning in commentList[commentsAdded] &lt;- comment: number of items to replace is
+## not a multiple of replacement length
+
+## Warning in commentList[commentsAdded] &lt;- comment: number of items to replace is
+## not a multiple of replacement length
+
+## Warning in commentList[commentsAdded] &lt;- comment: number of items to replace is
+## not a multiple of replacement length
+
+## Warning in commentList[commentsAdded] &lt;- comment: number of items to replace is
+## not a multiple of replacement length
+
+## Warning in commentList[commentsAdded] &lt;- comment: number of items to replace is
+## not a multiple of replacement length
+
+## Warning in commentList[commentsAdded] &lt;- comment: number of items to replace is
+## not a multiple of replacement length
+
+## Warning in commentList[commentsAdded] &lt;- comment: number of items to replace is
+## not a multiple of replacement length
+
+## Warning in commentList[commentsAdded] &lt;- comment: number of items to replace is
+## not a multiple of replacement length
+
+## Warning in commentList[commentsAdded] &lt;- comment: number of items to replace is
+## not a multiple of replacement length
+
+## Warning in commentList[commentsAdded] &lt;- comment: number of items to replace is
+## not a multiple of replacement length
+
+## Warning in commentList[commentsAdded] &lt;- comment: number of items to replace is
+## not a multiple of replacement length
+
+## Warning in commentList[commentsAdded] &lt;- comment: number of items to replace is
+## not a multiple of replacement length
+
+## Warning in commentList[commentsAdded] &lt;- comment: number of items to replace is
+## not a multiple of replacement length
+
+## Warning in commentList[commentsAdded] &lt;- comment: number of items to replace is
+## not a multiple of replacement length
+
+## Warning in commentList[commentsAdded] &lt;- comment: number of items to replace is
+## not a multiple of replacement length
+
+## Warning in commentList[commentsAdded] &lt;- comment: number of items to replace is
+## not a multiple of replacement length
+
+## Warning in commentList[commentsAdded] &lt;- comment: number of items to replace is
+## not a multiple of replacement length
+
+## Warning in commentList[commentsAdded] &lt;- comment: number of items to replace is
+## not a multiple of replacement length
+
+## Warning in commentList[commentsAdded] &lt;- comment: number of items to replace is
+## not a multiple of replacement length
+
+## Warning in commentList[commentsAdded] &lt;- comment: number of items to replace is
+## not a multiple of replacement length
+
+## Warning in commentList[commentsAdded] &lt;- comment: number of items to replace is
+## not a multiple of replacement length
+
+## Warning in commentList[commentsAdded] &lt;- comment: number of items to replace is
+## not a multiple of replacement length
+
+## Warning in commentList[commentsAdded] &lt;- comment: number of items to replace is
+## not a multiple of replacement length
+
+## Warning in commentList[commentsAdded] &lt;- comment: number of items to replace is
+## not a multiple of replacement length
+
+## Warning in commentList[commentsAdded] &lt;- comment: number of items to replace is
+## not a multiple of replacement length
+
+## Warning in commentList[commentsAdded] &lt;- comment: number of items to replace is
+## not a multiple of replacement length
+
+## Warning in commentList[commentsAdded] &lt;- comment: number of items to replace is
+## not a multiple of replacement length
+
+## Warning in commentList[commentsAdded] &lt;- comment: number of items to replace is
+## not a multiple of replacement length
+
+## Warning in commentList[commentsAdded] &lt;- comment: number of items to replace is
+## not a multiple of replacement length
+
+## Warning in commentList[commentsAdded] &lt;- comment: number of items to replace is
+## not a multiple of replacement length
+
+## Warning in commentList[commentsAdded] &lt;- comment: number of items to replace is
+## not a multiple of replacement length
+
+## Warning in commentList[commentsAdded] &lt;- comment: number of items to replace is
+## not a multiple of replacement length
+
+## Warning in commentList[commentsAdded] &lt;- comment: number of items to replace is
+## not a multiple of replacement length
+
+## Warning in commentList[commentsAdded] &lt;- comment: number of items to replace is
+## not a multiple of replacement length
+
+## Warning in commentList[commentsAdded] &lt;- comment: number of items to replace is
+## not a multiple of replacement length
+
+## Warning in commentList[commentsAdded] &lt;- comment: number of items to replace is
+## not a multiple of replacement length
+
+## Warning in commentList[commentsAdded] &lt;- comment: number of items to replace is
+## not a multiple of replacement length
+
+## Warning in commentList[commentsAdded] &lt;- comment: number of items to replace is
+## not a multiple of replacement length
+
+## Warning in commentList[commentsAdded] &lt;- comment: number of items to replace is
+## not a multiple of replacement length
+
+## Warning in commentList[commentsAdded] &lt;- comment: number of items to replace is
+## not a multiple of replacement length
+
+## Warning in commentList[commentsAdded] &lt;- comment: number of items to replace is
+## not a multiple of replacement length
+
+## Warning in commentList[commentsAdded] &lt;- comment: number of items to replace is
+## not a multiple of replacement length
+
+## Warning in commentList[commentsAdded] &lt;- comment: number of items to replace is
+## not a multiple of replacement length
+
+## Warning in commentList[commentsAdded] &lt;- comment: number of items to replace is
+## not a multiple of replacement length
+
+## Warning in commentList[commentsAdded] &lt;- comment: number of items to replace is
+## not a multiple of replacement length
+
+## Warning in commentList[commentsAdded] &lt;- comment: number of items to replace is
+## not a multiple of replacement length
+
+## Warning in commentList[commentsAdded] &lt;- comment: number of items to replace is
+## not a multiple of replacement length
+
+## Warning in commentList[commentsAdded] &lt;- comment: number of items to replace is
+## not a multiple of replacement length
+
+## Warning in commentList[commentsAdded] &lt;- comment: number of items to replace is
+## not a multiple of replacement length
+
+## Warning in commentList[commentsAdded] &lt;- comment: number of items to replace is
+## not a multiple of replacement length
+
+## Warning in commentList[commentsAdded] &lt;- comment: number of items to replace is
+## not a multiple of replacement length
+
+## Warning in commentList[commentsAdded] &lt;- comment: number of items to replace is
+## not a multiple of replacement length
+
+## Warning in commentList[commentsAdded] &lt;- comment: number of items to replace is
+## not a multiple of replacement length
+
+## Warning in commentList[commentsAdded] &lt;- comment: number of items to replace is
+## not a multiple of replacement length
+
+## Warning in commentList[commentsAdded] &lt;- comment: number of items to replace is
+## not a multiple of replacement length
+
+## Warning in commentList[commentsAdded] &lt;- comment: number of items to replace is
+## not a multiple of replacement length
+
+## Warning in commentList[commentsAdded] &lt;- comment: number of items to replace is
+## not a multiple of replacement length
+
+## Warning in commentList[commentsAdded] &lt;- comment: number of items to replace is
+## not a multiple of replacement length
+
+## Warning in commentList[commentsAdded] &lt;- comment: number of items to replace is
+## not a multiple of replacement length
+
+## Warning in commentList[commentsAdded] &lt;- comment: number of items to replace is
+## not a multiple of replacement length
+
+## Warning in commentList[commentsAdded] &lt;- comment: number of items to replace is
+## not a multiple of replacement length
+
+## Warning in commentList[commentsAdded] &lt;- comment: number of items to replace is
+## not a multiple of replacement length
+
+## Warning in commentList[commentsAdded] &lt;- comment: number of items to replace is
+## not a multiple of replacement length
+
+## Warning in commentList[commentsAdded] &lt;- comment: number of items to replace is
+## not a multiple of replacement length
+
+## Warning in commentList[commentsAdded] &lt;- comment: number of items to replace is
+## not a multiple of replacement length
+
+## Warning in commentList[commentsAdded] &lt;- comment: number of items to replace is
+## not a multiple of replacement length
+
+## Warning in commentList[commentsAdded] &lt;- comment: number of items to replace is
+## not a multiple of replacement length
+
+## Warning in commentList[commentsAdded] &lt;- comment: number of items to replace is
+## not a multiple of replacement length
+
+## Warning in commentList[commentsAdded] &lt;- comment: number of items to replace is
+## not a multiple of replacement length
+
+## Warning in commentList[commentsAdded] &lt;- comment: number of items to replace is
+## not a multiple of replacement length
+
+## Warning in commentList[commentsAdded] &lt;- comment: number of items to replace is
+## not a multiple of replacement length
+
+## Warning in commentList[commentsAdded] &lt;- comment: number of items to replace is
+## not a multiple of replacement length
+
+## Warning in commentList[commentsAdded] &lt;- comment: number of items to replace is
+## not a multiple of replacement length
+
+## Warning in commentList[commentsAdded] &lt;- comment: number of items to replace is
+## not a multiple of replacement length
+
+## Warning in commentList[commentsAdded] &lt;- comment: number of items to replace is
+## not a multiple of replacement length
+
+## Warning in commentList[commentsAdded] &lt;- comment: number of items to replace is
+## not a multiple of replacement length
+
+## Warning in commentList[commentsAdded] &lt;- comment: number of items to replace is
+## not a multiple of replacement length
+
+## Warning in commentList[commentsAdded] &lt;- comment: number of items to replace is
+## not a multiple of replacement length
+
+## Warning in commentList[commentsAdded] &lt;- comment: number of items to replace is
+## not a multiple of replacement length
+
+## Warning in commentList[commentsAdded] &lt;- comment: number of items to replace is
+## not a multiple of replacement length
+
+## Warning in commentList[commentsAdded] &lt;- comment: number of items to replace is
+## not a multiple of replacement length
+
+## Warning in commentList[commentsAdded] &lt;- comment: number of items to replace is
+## not a multiple of replacement length
+
+## Warning in commentList[commentsAdded] &lt;- comment: number of items to replace is
+## not a multiple of replacement length
+
+## Warning in commentList[commentsAdded] &lt;- comment: number of items to replace is
+## not a multiple of replacement length
+
+## Warning in commentList[commentsAdded] &lt;- comment: number of items to replace is
+## not a multiple of replacement length
+
+## Warning in commentList[commentsAdded] &lt;- comment: number of items to replace is
+## not a multiple of replacement length
+
+## Warning in commentList[commentsAdded] &lt;- comment: number of items to replace is
+## not a multiple of replacement length
+
+## Warning in commentList[commentsAdded] &lt;- comment: number of items to replace is
+## not a multiple of replacement length
+
+## Warning in commentList[commentsAdded] &lt;- comment: number of items to replace is
+## not a multiple of replacement length
+
+## Warning in commentList[commentsAdded] &lt;- comment: number of items to replace is
+## not a multiple of replacement length
+
+## Warning in commentList[commentsAdded] &lt;- comment: number of items to replace is
+## not a multiple of replacement length
+
+## Warning in commentList[commentsAdded] &lt;- comment: number of items to replace is
+## not a multiple of replacement length
+
+## Warning in commentList[commentsAdded] &lt;- comment: number of items to replace is
+## not a multiple of replacement length
+
+## Warning in commentList[commentsAdded] &lt;- comment: number of items to replace is
+## not a multiple of replacement length
+
+## Warning in commentList[commentsAdded] &lt;- comment: number of items to replace is
+## not a multiple of replacement length
+
+## Warning in commentList[commentsAdded] &lt;- comment: number of items to replace is
+## not a multiple of replacement length
+
+## Warning in commentList[commentsAdded] &lt;- comment: number of items to replace is
+## not a multiple of replacement length
+
+## Warning in commentList[commentsAdded] &lt;- comment: number of items to replace is
+## not a multiple of replacement length
+
+## Warning in commentList[commentsAdded] &lt;- comment: number of items to replace is
+## not a multiple of replacement length
+
+## Warning in commentList[commentsAdded] &lt;- comment: number of items to replace is
+## not a multiple of replacement length
+
+## Warning in commentList[commentsAdded] &lt;- comment: number of items to replace is
+## not a multiple of replacement length
+
+## Warning in commentList[commentsAdded] &lt;- comment: number of items to replace is
+## not a multiple of replacement length
+
+## Warning in commentList[commentsAdded] &lt;- comment: number of items to replace is
+## not a multiple of replacement length
+
+## Warning in commentList[commentsAdded] &lt;- comment: number of items to replace is
+## not a multiple of replacement length
+
+## Warning in commentList[commentsAdded] &lt;- comment: number of items to replace is
+## not a multiple of replacement length
+
+## Warning in commentList[commentsAdded] &lt;- comment: number of items to replace is
+## not a multiple of replacement length
+
+## Warning in commentList[commentsAdded] &lt;- comment: number of items to replace is
+## not a multiple of replacement length
+
+## Warning in commentList[commentsAdded] &lt;- comment: number of items to replace is
+## not a multiple of replacement length
+
+## Warning in commentList[commentsAdded] &lt;- comment: number of items to replace is
+## not a multiple of replacement length
+
+## Warning in commentList[commentsAdded] &lt;- comment: number of items to replace is
+## not a multiple of replacement length
+
+## Warning in commentList[commentsAdded] &lt;- comment: number of items to replace is
+## not a multiple of replacement length
+
+## Warning in commentList[commentsAdded] &lt;- comment: number of items to replace is
+## not a multiple of replacement length
+
+## Warning in commentList[commentsAdded] &lt;- comment: number of items to replace is
+## not a multiple of replacement length
+
+## Warning in commentList[commentsAdded] &lt;- comment: number of items to replace is
+## not a multiple of replacement length
+
+## Warning in commentList[commentsAdded] &lt;- comment: number of items to replace is
+## not a multiple of replacement length
+
+## Warning in commentList[commentsAdded] &lt;- comment: number of items to replace is
+## not a multiple of replacement length
+
+## Warning in commentList[commentsAdded] &lt;- comment: number of items to replace is
+## not a multiple of replacement length
+
+## Warning in commentList[commentsAdded] &lt;- comment: number of items to replace is
+## not a multiple of replacement length
+
+## Warning in commentList[commentsAdded] &lt;- comment: number of items to replace is
+## not a multiple of replacement length
+
+## Warning in commentList[commentsAdded] &lt;- comment: number of items to replace is
+## not a multiple of replacement length
+
+## Warning in commentList[commentsAdded] &lt;- comment: number of items to replace is
+## not a multiple of replacement length
+
+## Warning in commentList[commentsAdded] &lt;- comment: number of items to replace is
+## not a multiple of replacement length
+
+## Warning in commentList[commentsAdded] &lt;- comment: number of items to replace is
+## not a multiple of replacement length
+
+## Warning in commentList[commentsAdded] &lt;- comment: number of items to replace is
+## not a multiple of replacement length
+
+## Warning in commentList[commentsAdded] &lt;- comment: number of items to replace is
+## not a multiple of replacement length
+
+## Warning in commentList[commentsAdded] &lt;- comment: number of items to replace is
+## not a multiple of replacement length
+
+## Warning in commentList[commentsAdded] &lt;- comment: number of items to replace is
+## not a multiple of replacement length
+
+## Warning in commentList[commentsAdded] &lt;- comment: number of items to replace is
+## not a multiple of replacement length
+
+## Warning in commentList[commentsAdded] &lt;- comment: number of items to replace is
+## not a multiple of replacement length
+
+## Warning in commentList[commentsAdded] &lt;- comment: number of items to replace is
+## not a multiple of replacement length
+
+## Warning in commentList[commentsAdded] &lt;- comment: number of items to replace is
+## not a multiple of replacement length
+
+## Warning in commentList[commentsAdded] &lt;- comment: number of items to replace is
+## not a multiple of replacement length
+
+## Warning in commentList[commentsAdded] &lt;- comment: number of items to replace is
+## not a multiple of replacement length
+
+## Warning in commentList[commentsAdded] &lt;- comment: number of items to replace is
+## not a multiple of replacement length
+
+## Warning in commentList[commentsAdded] &lt;- comment: number of items to replace is
+## not a multiple of replacement length
+
+## Warning in commentList[commentsAdded] &lt;- comment: number of items to replace is
+## not a multiple of replacement length
+
+## Warning in commentList[commentsAdded] &lt;- comment: number of items to replace is
+## not a multiple of replacement length
+
+## Warning in commentList[commentsAdded] &lt;- comment: number of items to replace is
+## not a multiple of replacement length
+
+## Warning in commentList[commentsAdded] &lt;- comment: number of items to replace is
+## not a multiple of replacement length
+
+## Warning in commentList[commentsAdded] &lt;- comment: number of items to replace is
+## not a multiple of replacement length
+
+## Warning in commentList[commentsAdded] &lt;- comment: number of items to replace is
+## not a multiple of replacement length
+
+## Warning in commentList[commentsAdded] &lt;- comment: number of items to replace is
+## not a multiple of replacement length
+
+## Warning in commentList[commentsAdded] &lt;- comment: number of items to replace is
+## not a multiple of replacement length
+
+## Warning in commentList[commentsAdded] &lt;- comment: number of items to replace is
+## not a multiple of replacement length
+
+## Warning in commentList[commentsAdded] &lt;- comment: number of items to replace is
+## not a multiple of replacement length
+
+## Warning in commentList[commentsAdded] &lt;- comment: number of items to replace is
+## not a multiple of replacement length
+
+## Warning in commentList[commentsAdded] &lt;- comment: number of items to replace is
+## not a multiple of replacement length
+
+## Warning in commentList[commentsAdded] &lt;- comment: number of items to replace is
+## not a multiple of replacement length
+
+## Warning in commentList[commentsAdded] &lt;- comment: number of items to replace is
+## not a multiple of replacement length
+
+## Warning in commentList[commentsAdded] &lt;- comment: number of items to replace is
+## not a multiple of replacement length
+
+## Warning in commentList[commentsAdded] &lt;- comment: number of items to replace is
+## not a multiple of replacement length
+
+## Warning in commentList[commentsAdded] &lt;- comment: number of items to replace is
+## not a multiple of replacement length
+
+## Warning in commentList[commentsAdded] &lt;- comment: number of items to replace is
+## not a multiple of replacement length
+
+## Warning in commentList[commentsAdded] &lt;- comment: number of items to replace is
+## not a multiple of replacement length
+
+## Warning in commentList[commentsAdded] &lt;- comment: number of items to replace is
+## not a multiple of replacement length
+
+## Warning in commentList[commentsAdded] &lt;- comment: number of items to replace is
+## not a multiple of replacement length
+
+## Warning in commentList[commentsAdded] &lt;- comment: number of items to replace is
+## not a multiple of replacement length
+
+## Warning in commentList[commentsAdded] &lt;- comment: number of items to replace is
+## not a multiple of replacement length
+
+## Warning in commentList[commentsAdded] &lt;- comment: number of items to replace is
+## not a multiple of replacement length
+
+## Warning in commentList[commentsAdded] &lt;- comment: number of items to replace is
+## not a multiple of replacement length
+
+## Warning in commentList[commentsAdded] &lt;- comment: number of items to replace is
+## not a multiple of replacement length
+
+## Warning in commentList[commentsAdded] &lt;- comment: number of items to replace is
+## not a multiple of replacement length
+
+## Warning in commentList[commentsAdded] &lt;- comment: number of items to replace is
+## not a multiple of replacement length
+
+## Warning in commentList[commentsAdded] &lt;- comment: number of items to replace is
+## not a multiple of replacement length
+
+## Warning in commentList[commentsAdded] &lt;- comment: number of items to replace is
+## not a multiple of replacement length
+
+## Warning in commentList[commentsAdded] &lt;- comment: number of items to replace is
+## not a multiple of replacement length
+
+## Warning in commentList[commentsAdded] &lt;- comment: number of items to replace is
+## not a multiple of replacement length
+
+## Warning in commentList[commentsAdded] &lt;- comment: number of items to replace is
+## not a multiple of replacement length
+
+## Warning in commentList[commentsAdded] &lt;- comment: number of items to replace is
+## not a multiple of replacement length
+
+## Warning in commentList[commentsAdded] &lt;- comment: number of items to replace is
+## not a multiple of replacement length
+
+## Warning in commentList[commentsAdded] &lt;- comment: number of items to replace is
+## not a multiple of replacement length
+
+## Warning in commentList[commentsAdded] &lt;- comment: number of items to replace is
+## not a multiple of replacement length
+
+## Warning in commentList[commentsAdded] &lt;- comment: number of items to replace is
+## not a multiple of replacement length
+
+## Warning in commentList[commentsAdded] &lt;- comment: number of items to replace is
+## not a multiple of replacement length
+
+## Warning in commentList[commentsAdded] &lt;- comment: number of items to replace is
+## not a multiple of replacement length
+
+## Warning in commentList[commentsAdded] &lt;- comment: number of items to replace is
+## not a multiple of replacement length
+
+## Warning in commentList[commentsAdded] &lt;- comment: number of items to replace is
+## not a multiple of replacement length
+
+## Warning in commentList[commentsAdded] &lt;- comment: number of items to replace is
+## not a multiple of replacement length
+
+## Warning in commentList[commentsAdded] &lt;- comment: number of items to replace is
+## not a multiple of replacement length
+
+## Warning in commentList[commentsAdded] &lt;- comment: number of items to replace is
+## not a multiple of replacement length
+
+## Warning in commentList[commentsAdded] &lt;- comment: number of items to replace is
+## not a multiple of replacement length
+
+## Warning in commentList[commentsAdded] &lt;- comment: number of items to replace is
+## not a multiple of replacement length
+
+## Warning in commentList[commentsAdded] &lt;- comment: number of items to replace is
+## not a multiple of replacement length
+
+## Warning in commentList[commentsAdded] &lt;- comment: number of items to replace is
+## not a multiple of replacement length
+
+## Warning in commentList[commentsAdded] &lt;- comment: number of items to replace is
+## not a multiple of replacement length
+
+## Warning in commentList[commentsAdded] &lt;- comment: number of items to replace is
+## not a multiple of replacement length
+
+## Warning in commentList[commentsAdded] &lt;- comment: number of items to replace is
+## not a multiple of replacement length
+
+## Warning in commentList[commentsAdded] &lt;- comment: number of items to replace is
+## not a multiple of replacement length
+
+## Warning in commentList[commentsAdded] &lt;- comment: number of items to replace is
+## not a multiple of replacement length
+
+## Warning in commentList[commentsAdded] &lt;- comment: number of items to replace is
+## not a multiple of replacement length
+
+## Warning in commentList[commentsAdded] &lt;- comment: number of items to replace is
+## not a multiple of replacement length
+
+## Warning in commentList[commentsAdded] &lt;- comment: number of items to replace is
+## not a multiple of replacement length
+
+## Warning in commentList[commentsAdded] &lt;- comment: number of items to replace is
+## not a multiple of replacement length
+
+## Warning in commentList[commentsAdded] &lt;- comment: number of items to replace is
+## not a multiple of replacement length
+
+## Warning in commentList[commentsAdded] &lt;- comment: number of items to replace is
+## not a multiple of replacement length
+
+## Warning in commentList[commentsAdded] &lt;- comment: number of items to replace is
+## not a multiple of replacement length
+
+## Warning in commentList[commentsAdded] &lt;- comment: number of items to replace is
+## not a multiple of replacement length
+
+## Warning in commentList[commentsAdded] &lt;- comment: number of items to replace is
+## not a multiple of replacement length
+
+## Warning in commentList[commentsAdded] &lt;- comment: number of items to replace is
+## not a multiple of replacement length
+
+## Warning in commentList[commentsAdded] &lt;- comment: number of items to replace is
+## not a multiple of replacement length
+
+## Warning in commentList[commentsAdded] &lt;- comment: number of items to replace is
+## not a multiple of replacement length
+
+## Warning in commentList[commentsAdded] &lt;- comment: number of items to replace is
+## not a multiple of replacement length
+
+## Warning in commentList[commentsAdded] &lt;- comment: number of items to replace is
+## not a multiple of replacement length
+
+## Warning in commentList[commentsAdded] &lt;- comment: number of items to replace is
+## not a multiple of replacement length
+
+## Warning in commentList[commentsAdded] &lt;- comment: number of items to replace is
+## not a multiple of replacement length
+
+## Warning in commentList[commentsAdded] &lt;- comment: number of items to replace is
+## not a multiple of replacement length
+
+## Warning in commentList[commentsAdded] &lt;- comment: number of items to replace is
+## not a multiple of replacement length
+
+## Warning in commentList[commentsAdded] &lt;- comment: number of items to replace is
+## not a multiple of replacement length
+
+## Warning in commentList[commentsAdded] &lt;- comment: number of items to replace is
+## not a multiple of replacement length
+
+## Warning in commentList[commentsAdded] &lt;- comment: number of items to replace is
+## not a multiple of replacement length
+
+## Warning in commentList[commentsAdded] &lt;- comment: number of items to replace is
+## not a multiple of replacement length
+
+## Warning in commentList[commentsAdded] &lt;- comment: number of items to replace is
+## not a multiple of replacement length
+
+## Warning in commentList[commentsAdded] &lt;- comment: number of items to replace is
+## not a multiple of replacement length
+
+## Warning in commentList[commentsAdded] &lt;- comment: number of items to replace is
+## not a multiple of replacement length
+
+## Warning in commentList[commentsAdded] &lt;- comment: number of items to replace is
+## not a multiple of replacement length
+
+## Warning in commentList[commentsAdded] &lt;- comment: number of items to replace is
+## not a multiple of replacement length
+
+## Warning in commentList[commentsAdded] &lt;- comment: number of items to replace is
+## not a multiple of replacement length
+
+## Warning in commentList[commentsAdded] &lt;- comment: number of items to replace is
+## not a multiple of replacement length
+
+## Warning in commentList[commentsAdded] &lt;- comment: number of items to replace is
+## not a multiple of replacement length
+
+## Warning in commentList[commentsAdded] &lt;- comment: number of items to replace is
+## not a multiple of replacement length
+
+## Warning in commentList[commentsAdded] &lt;- comment: number of items to replace is
+## not a multiple of replacement length
+
+## Warning in commentList[commentsAdded] &lt;- comment: number of items to replace is
+## not a multiple of replacement length
+
+## Warning in commentList[commentsAdded] &lt;- comment: number of items to replace is
+## not a multiple of replacement length
+
+## Warning in commentList[commentsAdded] &lt;- comment: number of items to replace is
+## not a multiple of replacement length
+
+## Warning in commentList[commentsAdded] &lt;- comment: number of items to replace is
+## not a multiple of replacement length
+
+## Warning in commentList[commentsAdded] &lt;- comment: number of items to replace is
+## not a multiple of replacement length
+
+## Warning in commentList[commentsAdded] &lt;- comment: number of items to replace is
+## not a multiple of replacement length
+
+## Warning in commentList[commentsAdded] &lt;- comment: number of items to replace is
+## not a multiple of replacement length
+
+## Warning in commentList[commentsAdded] &lt;- comment: number of items to replace is
+## not a multiple of replacement length
+
+## Warning in commentList[commentsAdded] &lt;- comment: number of items to replace is
+## not a multiple of replacement length
+
+## Warning in commentList[commentsAdded] &lt;- comment: number of items to replace is
+## not a multiple of replacement length
+
+## Warning in commentList[commentsAdded] &lt;- comment: number of items to replace is
+## not a multiple of replacement length
+
+## Warning in commentList[commentsAdded] &lt;- comment: number of items to replace is
+## not a multiple of replacement length
+
+## Warning in commentList[commentsAdded] &lt;- comment: number of items to replace is
+## not a multiple of replacement length
+
+## Warning in commentList[commentsAdded] &lt;- comment: number of items to replace is
+## not a multiple of replacement length
+
+## Warning in commentList[commentsAdded] &lt;- comment: number of items to replace is
+## not a multiple of replacement length
+
+## Warning in commentList[commentsAdded] &lt;- comment: number of items to replace is
+## not a multiple of replacement length
+
+## Warning in commentList[commentsAdded] &lt;- comment: number of items to replace is
+## not a multiple of replacement length
+
+## Warning in commentList[commentsAdded] &lt;- comment: number of items to replace is
+## not a multiple of replacement length
+
+## Warning in commentList[commentsAdded] &lt;- comment: number of items to replace is
+## not a multiple of replacement length
+
+## Warning in commentList[commentsAdded] &lt;- comment: number of items to replace is
+## not a multiple of replacement length
+
+## Warning in commentList[commentsAdded] &lt;- comment: number of items to replace is
+## not a multiple of replacement length
+
+## Warning in commentList[commentsAdded] &lt;- comment: number of items to replace is
+## not a multiple of replacement length
+
+## Warning in commentList[commentsAdded] &lt;- comment: number of items to replace is
+## not a multiple of replacement length
+
+## Warning in commentList[commentsAdded] &lt;- comment: number of items to replace is
+## not a multiple of replacement length
+
+## Warning in commentList[commentsAdded] &lt;- comment: number of items to replace is
+## not a multiple of replacement length
+
+## Warning in commentList[commentsAdded] &lt;- comment: number of items to replace is
+## not a multiple of replacement length
+
+## Warning in commentList[commentsAdded] &lt;- comment: number of items to replace is
+## not a multiple of replacement length
+
+## Warning in commentList[commentsAdded] &lt;- comment: number of items to replace is
+## not a multiple of replacement length
+
+## Warning in commentList[commentsAdded] &lt;- comment: number of items to replace is
+## not a multiple of replacement length
+
+## Warning in commentList[commentsAdded] &lt;- comment: number of items to replace is
+## not a multiple of replacement length
+
+## Warning in commentList[commentsAdded] &lt;- comment: number of items to replace is
+## not a multiple of replacement length
+
+## Warning in commentList[commentsAdded] &lt;- comment: number of items to replace is
+## not a multiple of replacement length
+
+## Warning in commentList[commentsAdded] &lt;- comment: number of items to replace is
+## not a multiple of replacement length
+
+## Warning in commentList[commentsAdded] &lt;- comment: number of items to replace is
+## not a multiple of replacement length
+
+## Warning in commentList[commentsAdded] &lt;- comment: number of items to replace is
+## not a multiple of replacement length
+
+## Warning in commentList[commentsAdded] &lt;- comment: number of items to replace is
+## not a multiple of replacement length
+
+## Warning in commentList[commentsAdded] &lt;- comment: number of items to replace is
+## not a multiple of replacement length
+
+## Warning in commentList[commentsAdded] &lt;- comment: number of items to replace is
+## not a multiple of replacement length
+
+## Warning in commentList[commentsAdded] &lt;- comment: number of items to replace is
+## not a multiple of replacement length
+
+## Warning in commentList[commentsAdded] &lt;- comment: number of items to replace is
+## not a multiple of replacement length
+
+## Warning in commentList[commentsAdded] &lt;- comment: number of items to replace is
+## not a multiple of replacement length
+
+## Warning in commentList[commentsAdded] &lt;- comment: number of items to replace is
+## not a multiple of replacement length
+
+## Warning in commentList[commentsAdded] &lt;- comment: number of items to replace is
+## not a multiple of replacement length
+
+## Warning in commentList[commentsAdded] &lt;- comment: number of items to replace is
+## not a multiple of replacement length
+
+## Warning in commentList[commentsAdded] &lt;- comment: number of items to replace is
+## not a multiple of replacement length
+
+## Warning in commentList[commentsAdded] &lt;- comment: number of items to replace is
+## not a multiple of replacement length
+
+## Warning in commentList[commentsAdded] &lt;- comment: number of items to replace is
+## not a multiple of replacement length
+
+## Warning in commentList[commentsAdded] &lt;- comment: number of items to replace is
+## not a multiple of replacement length
+
+## Warning in commentList[commentsAdded] &lt;- comment: number of items to replace is
+## not a multiple of replacement length
+
+## Warning in commentList[commentsAdded] &lt;- comment: number of items to replace is
+## not a multiple of replacement length
+
+## Warning in commentList[commentsAdded] &lt;- comment: number of items to replace is
+## not a multiple of replacement length
+
+## Warning in commentList[commentsAdded] &lt;- comment: number of items to replace is
+## not a multiple of replacement length
+
+## Warning in commentList[commentsAdded] &lt;- comment: number of items to replace is
+## not a multiple of replacement length
+
+## Warning in commentList[commentsAdded] &lt;- comment: number of items to replace is
+## not a multiple of replacement length
+
+## Warning in commentList[commentsAdded] &lt;- comment: number of items to replace is
+## not a multiple of replacement length
+
+## Warning in commentList[commentsAdded] &lt;- comment: number of items to replace is
+## not a multiple of replacement length
+
+## Warning in commentList[commentsAdded] &lt;- comment: number of items to replace is
+## not a multiple of replacement length
+
+## Warning in commentList[commentsAdded] &lt;- comment: number of items to replace is
+## not a multiple of replacement length
+
+## Warning in commentList[commentsAdded] &lt;- comment: number of items to replace is
+## not a multiple of replacement length
+
+## Warning in commentList[commentsAdded] &lt;- comment: number of items to replace is
+## not a multiple of replacement length
+
+## Warning in commentList[commentsAdded] &lt;- comment: number of items to replace is
+## not a multiple of replacement length
+
+## Warning in commentList[commentsAdded] &lt;- comment: number of items to replace is
+## not a multiple of replacement length
+
+## Warning in commentList[commentsAdded] &lt;- comment: number of items to replace is
+## not a multiple of replacement length
+
+## Warning in commentList[commentsAdded] &lt;- comment: number of items to replace is
+## not a multiple of replacement length
+
+## Warning in commentList[commentsAdded] &lt;- comment: number of items to replace is
+## not a multiple of replacement length
+
+## Warning in commentList[commentsAdded] &lt;- comment: number of items to replace is
+## not a multiple of replacement length</code></pre>
 <pre><code>## Warning in addDataFrame(commentDF, s, col.names = TRUE, row.names = FALSE, :
+## Some cells exceed Excel's limit of 32767 characters and they will be truncated
+
+## Warning in addDataFrame(commentDF, s, col.names = TRUE, row.names = FALSE, :
 ## Some cells exceed Excel's limit of 32767 characters and they will be truncated</code></pre>
-<pre><code>## Run time of 13.9510866908232 or 0.00150140838256815 per comment</code></pre>
 </div>
 </div>
-<div id="next-steps" class="section level1">
-<h1>Next Steps</h1>
-<ol start="3" style="list-style-type: decimal">
-<li>Test rate limit handling and run through while deleting files to find edge cases</li>
-<li>OCR with PDFtools?</li>
-<li>Make unified PDF</li>
+<div id="possible-improvements" class="section level1">
+<h1>Possible Improvements</h1>
+<ol start="0" style="list-style-type: decimal">
+<li>Fix “comment + attachment” cell in download function</li>
+<li>Find way of saving comments–as downloaded–separately, perhaps in one long list</li>
+<li>Make unified PDF of all downloaded attachments</li>
 </ol>
-<p>5.1) including of multi-part comments like EDF (9240 &amp;c) and NRDC (9299 &amp;c)</p>
-<p>5.2) fix document ordering (removed because sometimes seems discontinuous?)</p>
-<ol start="6" style="list-style-type: decimal">
-<li>Statistical characterization:</li>
+<p>2.1) including combining multi-part comments like EDF (9240 &amp;c) and NRDC (9299 &amp;c)</p>
+<p>2.2) fix document ordering (removed because sometimes seems discontinuous?)</p>
+<ol start="4" style="list-style-type: decimal">
+<li><p>OCR with PDFtools?</p></li>
+<li><p>Statistical characterization:</p></li>
 </ol>
 <!-- -->
 <ol style="list-style-type: lower-alpha">
-<li>How many non-unique comments</li>
+<li>Types of comments</li>
 <li>Distribution of n_attachments</li>
 </ol>
 <ul>
@@ -1273,6 +1957,42 @@ fixTimeString &lt;- function(yyyymmddThhmmssZ) {
 <li>Search functions</li>
 <li>As a QOL change for future users, might be easier if we’re sorting by comment ID or object ID than modify date as GSA proposes</li>
 </ol>
+<p>** 10) Look for homology with mass mail comments – code for text matching For mad-libs – pull distinctive phrases (maybe matches 3 of 4)</p>
+<ol start="11" style="list-style-type: decimal">
+<li><p>See if filtering by date or character count can help us find some oppposing comments</p></li>
+<li><p>Download and save the original comments and files to something that’s sync’d with GitHub</p></li>
+<li>Create samples to read and memo on</li>
+</ol>
+<ul>
+<li>samples from organized cluster – to understand flavor &amp; variations</li>
+</ul>
+<ol start="14" style="list-style-type: decimal">
+<li><p>Analyze government comments separately - put them in Zotero</p></li>
+<li><p>Notes on things to be researched – who’s behind x phrase at Y time</p></li>
+<li><p>Lit review - Panofsky on open science</p></li>
+<li><p>Journal targets – critique of transparency in big data journal, or STSy take on infrastructure **</p></li>
+</ol>
+</div>
+<div id="data-cleaning-problems" class="section level1">
+<h1>Data cleaning problems</h1>
+<ul>
+<li>Currently don’t have correct comment+pdf cell (think this is solved)</li>
+<li>Currently don’t have correct nonPdf count (think this is solved)</li>
+<li>Some attachments have multiple potential download types (think this is solved)</li>
+<li>Want to individually examine late comments which are typically specifically important</li>
+<li>Some PDFs aren’t parsed (silent failure)</li>
+<li>Some files aren’t pdfs (warned failure, usually hand-fixable)</li>
+<li>Some files are restricted (warned failure, usually )</li>
+<li>Some comments need to be combined (typically one comment with many attachments)</li>
+</ul>
+<div id="pdf-errors-to-deal-with" class="section level2">
+<h2>PDF errors to deal with</h2>
+<ul>
+<li>PDF error: read ICCBased color space profile error</li>
+<li>PDF error: not an ICC profile, invalid signature</li>
+<li>PDF error: invalid font weight</li>
+</ul>
+</div>
 </div>
 
 

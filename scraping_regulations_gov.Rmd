@@ -200,7 +200,7 @@ We can see from df2 that the `objectId` of the 2018 proposed rule is "0900006483
 For now, we will focus on the 2018 proposed rule:
 
 ```{r, message=FALSE}
-oID <- "090000648320bc9e" 
+oID <- "0900006484450a29" 
 ```
 
 ## How many comments?
@@ -528,10 +528,11 @@ to add comments one by one to a data frame that carries their `attributes`, both
   batchN <- 1  
   commentsAdded <- 0
   
-  attachmentsDest <- "attachments18"
+  attachmentsDest <- "/Users/Bennett/Library/CloudStorage/Box-Box/EPA_Transparency_Comments/Attachments/proposal_comments_2020" # For syncing with Box, use 
+  #/Users/[yourname]/Library/CloudStorage/Box-Box/EPA_Transparency_Comments/whatever on mac equivalent directory on your device
 
   
-    # if previous download was interrupted partway through, can specify starting with a particular comment
+  # if previous download was interrupted partway through, can specify starting with a particular comment
   # otherwise, this should be set to ""
   # currently there is no way to save the dataframe from interrupted downloads, so only use this for testing and fetching files, not comment data
   startCommentID <- ""
@@ -639,8 +640,8 @@ to add comments one by one to a data frame that carries their `attributes`, both
   # colnames(c)[1] <- "ID"
   # colnames(c)[2] <- "full text"
   # 
-  save(commentDF, file = "08_06_commentDf18.RData")
-  save(commentList, file = "08_06_commentList18.RData")
+  save(commentDF, file = "/Users/Bennett/Library/CloudStorage/Box-Box/EPA_Transparency_Comments/Data/08_07_commentDf20.RData")
+  save(commentList, file = "/Users/Bennett/Library/CloudStorage/Box-Box/EPA_Transparency_Comments/Data/08_07_commentList20.RData")
   # 
   # cSmol <- subset(c, select = c(ID, `full text`, commentOnDocumentId, duplicateComments, 
   #                               comment, docketId, documentType, objectId, modifyDate, pageCount, 
@@ -650,7 +651,7 @@ to add comments one by one to a data frame that carries their `attributes`, both
   s <- createSheet(wb, sheetName = "comments")
   
   addDataFrame(commentDF, s, col.names = TRUE, row.names = FALSE, byrow = FALSE)
-  saveWorkbook(wb, "08_06_commentTable18.xlsx")
+  saveWorkbook(wb, "/Users/Bennett/Library/CloudStorage/Box-Box/EPA_Transparency_Comments/Data/08_07_commentTable20.xlsx")
   
   # log the total time and time per comment
   endTime <- lubridate::now()
@@ -663,13 +664,9 @@ to add comments one by one to a data frame that carries their `attributes`, both
 
 # Possible Improvements
 
-0)  Fix "comment + attachment" cell in download function
-1)  Find way of saving comments--as downloaded--separately, perhaps in one long list
 2)  Make unified PDF of all downloaded attachments
 
 2.1) including combining multi-part comments like EDF (9240 &c) and NRDC (9299 &c) 
-
-2.2) fix document ordering (removed because sometimes seems discontinuous?)
 
 4)  OCR with PDFtools?
 
@@ -707,8 +704,6 @@ For mad-libs -- pull distinctive phrases (maybe matches 3 of 4)
 
 11)  See if filtering by date or character count can help us find some oppposing comments
 
-12)  Download and save the original comments and files to something that's sync'd with GitHub
-
 13)  Create samples to read and memo on
 - samples from organized cluster -- to understand flavor & variations
 
@@ -722,11 +717,18 @@ For mad-libs -- pull distinctive phrases (maybe matches 3 of 4)
 **
 
 # Data cleaning problems
--  Currently don't have correct comment+pdf cell
--  Currently don't have correct nonPdf count
--  Want to individually examine late comments which are typically specifically impoortant
+-  Currently don't have correct comment+pdf cell (think this is solved)
+-  Currently don't have correct nonPdf count (think this is solved)
+-  Some attachments have multiple potential download types (think this is solved)
+-  Want to individually examine late comments which are typically specifically important
 -  Some PDFs aren't parsed (silent failure)
 -  Some files aren't pdfs (warned failure, usually hand-fixable)
 -  Some files are restricted (warned failure, usually )
--  Some comments need to be combined (multiple references in linked comments)
+-  Some comments need to be combined (typically one comment with many attachments)
+
+## PDF errors to deal with
+-  PDF error: read ICCBased color space profile error
+-  PDF error: not an ICC profile, invalid signature
+-  PDF error: invalid font weight
+
 

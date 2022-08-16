@@ -43,8 +43,10 @@ vignettes/*.pdf
 !/attachments/test.pdf
 /tempattchmts
 /archived_data
-*.xlsx
-*.RData
+*/.RData
+*/.xlsx
+!/epa_transparency_rule_data
+
 
 # logs and some deprecated code I've been playing around with
 *log.txt

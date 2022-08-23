@@ -45,7 +45,6 @@ vignettes/*.pdf
 /archived_data
 */.RData
 */.xlsx
-!/epa_transparency_rule_data
 
 
 # logs and some deprecated code I've been playing around with

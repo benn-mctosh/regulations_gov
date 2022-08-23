@@ -357,6 +357,28 @@ pre code {
 </div>
 
 
+<pre class="r"><code>knitr::opts_chunk$set(echo = TRUE)
+
+# .xlsx export requires several MB of java heap space; so 1g is prudent overkill
+options(java.parameters = &quot;-Xmx1g&quot;) 
+
+# Load helper functions -- these are the functions mentioned in the text below
+source(&quot;functions/regulations_gov_functions.R&quot;)</code></pre>
+<pre><code>## ── Attaching packages ─────────────────────────────────────── tidyverse 1.3.1 ──</code></pre>
+<pre><code>## ✔ ggplot2 3.3.6     ✔ purrr   0.3.4
+## ✔ tibble  3.1.7     ✔ dplyr   1.0.9
+## ✔ tidyr   1.2.0     ✔ stringr 1.4.0
+## ✔ readr   2.1.2     ✔ forcats 0.5.1</code></pre>
+<pre><code>## ── Conflicts ────────────────────────────────────────── tidyverse_conflicts() ──
+## ✖ dplyr::filter()  masks stats::filter()
+## ✖ purrr::flatten() masks jsonlite::flatten()
+## ✖ dplyr::lag()     masks stats::lag()</code></pre>
+<pre><code>## Using poppler version 22.02.0</code></pre>
+<pre class="r"><code># Load the api_key from environmental variables
+api_key &lt;- Sys.getenv(&quot;regulations_gov_key&quot;)
+
+# Set demo = TRUE to run examples in several of the code blocks below
+demo = FALSE </code></pre>
 <div id="background-and-prerequisites" class="section level1">
 <h1>Background and Prerequisites</h1>
 <p>For a research project, we need to scrape comments submitted to the Environmental Protection Agency on a proposed rule. The comments are posted on <a href="https://www.regulations.gov/document/EPA-HQ-OA-2018-0259-9322/comment">regulations.gov</a>.</p>
@@ -367,169 +389,119 @@ pre code {
 <li><p>A directory containing PDFs (or similar NVivo-legible document) of every comment, in sub-directories named by comment ID for future search/analysis. The documents in this directory should include both the attachments to the comments themselves, as well as a holistic document, with a table of contents, that combines the comment and all attachments</p></li>
 </ol>
 <p>Documentation for the regulations.gov API is available <a href="https://open.gsa.gov/api/regulationsgov/">here</a>. An API key can be requested <a href="https://api.data.gov/signup/">here</a>.</p>
-<p>The below code assumes you have saved your API key as “regulations_gov_key” in your <code>renviron</code>. We also make use of a few libraries, listed above.</p>
+<p>The below code assumes you have saved your API key as “regulations_gov_key” in your <code>renviron</code>. We also make use of a few libraries, listed in regulations_gov_functions.R</p>
 </div>
 <div id="affordances-and-constraints" class="section level1">
 <h1>Affordances and constraints</h1>
 <div id="rate-limits" class="section level2">
 <h2>Rate Limits</h2>
-<p>The GSA imposes a <a href="https://api.data.gov/docs/rate-limits/">rate limit</a> of 1000 requests per hour (on a rolling basis) for the api keys it distributes. To avoid running afoul of these, we use a wrapper for the GET() function that simply pauses execution when we approach the limits. This is not the most efficient solution, since the rate limits function on a rolling basis (so if we made our first request at 10:15 and our 1000th at 10:25 we could start making new requests at 11:15, not 11:25), but it will serve for the scale at which we are working.</p>
-<p>NOTE: It seems like the rate limiting doesn’t refresh as quickly as we might prefer, so we sleep for an extra 5 minutes. The GSA does have a way of requesting an increase to your rate limit. Since we will mostly be working with files offline, we haven’t done that, but you may want to</p>
-<pre class="r"><code>get_or_wait &lt;- function(url) {
-  
-  # GET the item from the URL given.
-  # Within a trycatch in case GET() returns an error
-  
-  r &lt;- NA
-  sleepTime &lt;- 60 # if there's a connection issue, try again in a minute
-  while (is.na(r[1])) {
-  
-    r &lt;- tryCatch(
-      {
-        r &lt;- GET(url)
-      }, 
-      error=function(cond) {
-        message(paste(&quot;error in fetching url: &quot;, url))
-        message(cond)
-        Sys.sleep(sleepTime)
-        return(NA)
-      }
-      
-      
-    )
-  }
-
-  # Your remaining requests before the rate limit are stored in r$headers
-  remaining &lt;- as.integer(r$headers$`x-ratelimit-remaining`)
-  
-  # I got an error once where this was true and have not yet been able to reproduce it, so just in case...
-  if (length(remaining &lt; 5) == 0) {
-    message(&quot;got that error where remaining &lt; 5 is of length 0 happened again, saving raw data&quot;)
-    saveRDS(r, &quot;badRawComment.RData&quot;)
-  }
-  
-  # If remaining requests are low, sleep for an hour and then resume execution, reporting the action in &quot;log.txt&quot;
-  if (remaining &lt; 5) {
-    pauseTime &lt;- lubridate::now()
-    message(&quot;APPROACHING RATE LIMIT: pausing until 1hr 5min from &quot;, pauseTime, &quot;\n&quot;,
-               &quot;requests remaining currently: &quot;, remaining, &quot;\n&quot;)
-    Sys.sleep(3900)
-    restartTime &lt;- lubridate::now()
-    r &lt;- GET(url)
-    remaining &lt;- as.integer(r$headers$`x-ratelimit-remaining`)
-    message(&quot;Restarting at &quot;, restartTime, &quot;; requests remaining currently: &quot;, remaining, &quot;\n&quot;)
-  }
-  return(r)
-}</code></pre>
-<p>Note the messages in the above. These (and others below) are the ones I have found most useful in debugging; running this code, especially the download function below, generates many other messages to <code>stdout</code> that I have found less useful.</p>
+<p>The GSA imposes a <a href="https://api.data.gov/docs/rate-limits/">rate limit</a> of 1000 requests per hour (on a rolling basis) for the API keys it distributes. To avoid running afoul of these, we use a wrapper for the GET() function that simply pauses execution when we approach the limits. This is not the most efficient solution, since the rate limits function on a rolling basis (so if we made our first request at 10:15 and our 1000th at 10:25 we could start making new requests at 11:15, not 11:25), but it will serve for the scale at which we are working.</p>
+<p>Unfortunately, it seems like the rate limiting doesn’t refresh as quickly as we might prefer, so we sleep for an extra 5 minutes (1h5m). The GSA does have a way of requesting an increase to your rate limit. Since we will mostly be working with files offline, we haven’t done that, but you may want to if you’re grabbing many thousands of comments.</p>
+<p>Note the messages generated by the above function. These (and others below) are the ones I have found most useful in debugging and logging some of the idiosyncrasies of these data, noted below. Running this code, especially the download function below, generates many other messages to <code>stdout</code> that I have found less useful and try to suppress</p>
 </div>
 <div id="helper-functions" class="section level2">
 <h2>Helper functions</h2>
 <p>Before we run the request, a few helper functions help us log which comments have been downloaded and put all the comments together into a data frame.</p>
-<pre class="r"><code># nullToNA replaces NULL elements of a list with NA
-nullToNA &lt;- function(x) {
-  x[sapply(x, is.null)] &lt;- NA
-  return(x)
-}
-
-# slug() takes a string with at least one hyphen and extracts everything after the last hyphen
-# so for a comment's ID EPA-HQ-OA-2018-0259-####(#), it would extract the suffixed numbers
-# other agencies may have other ID formats, but &quot;everything after last hyphen&quot; seems like a decent slug for most dockets
-# I also use this to get file extensions from filenames (sep = &quot;.&quot;)
-slug &lt;- function(string, sep = &quot;-&quot;) {
-  numSegments &lt;- str_count(string, sep) + 1
-  return(word(string, numSegments, sep = sep))
-}
-
-# fixTimeString takes the time in the form yyyy-mm-ddThh:mm:ssZ (as the API gives it) 
-# and returns yyyy-mm-dd hh:mm:ss (in Eastern Time) (as the API demands). 
-# Note that in URLs the space must be replaced with &quot;%20&quot;; eg in getPageOfComments() 
-fixTimeString &lt;- function(yyyymmddThhmmssZ) {
-  last_mod_UTC &lt;- as.POSIXct(sub(&quot;T&quot;, &quot; &quot;, yyyymmddThhmmssZ), tz = &quot;UTC&quot;)
-  last_mod &lt;- sub(&quot; E*T&quot;, &quot;&quot;, lubridate::with_tz(last_mod_UTC,
-                                                 &quot;America/New_York&quot;))
-  return(last_mod)
-}</code></pre>
+<ul>
+<li><code>nullToNA()</code> replaces NULL elements of a list with NA</li>
+<li><code>slug()</code> takes a string &amp; returns the characters after the last instance of sep
+<ul>
+<li>so it can be used to return the file extension (sep = “\\.”)</li>
+<li>or the last digits of an ID (sep = “-”; EPA-HQ-OA-2018-0259-#### -&gt; ####)</li>
+</ul></li>
+<li>Times are stored in regulations.gov data in a different form than the API expects when you’re making requests; <code>fixTimeString()</code> takes the time in the form <code>&quot;yyyy-mm-ddThh:mm:ssZ&quot;</code> (as given in comment data) and returns <code>&quot;yyyy-mm-dd hh:mm:ss&quot;</code> (in Eastern Time) (as the API demands).
+<ul>
+<li>Note that in request URLs the space in the must be replaced with <code>&quot;%20&quot;</code>; <em>eg.</em> in getPageOfComments()</li>
+</ul></li>
+</ul>
+<pre class="r"><code>if (demo) { print(nullToNA) }
+if (demo) { print(slug) }
+if (demo) { print(fixTimeString) }</code></pre>
 </div>
 <div id="page-limits" class="section level2">
 <h2>Page limits</h2>
 <p>In addition to the rate limits mentioned above, the GSA places a few other limits on the API:</p>
 <ol style="list-style-type: decimal">
 <li><p>When pulling a page of comments, the page may not be larger than 250 comments</p></li>
-<li><p>When paging through several pages of comments, you may only access up to 20 pages (i.e. calls for page 21+ of a search are not valid)</p></li>
+<li><p>When paging through several pages of comments, you may only access up to 20 pages (i.e. calls for page 21+ of any given search are not valid)</p></li>
 </ol>
-<p>This effectively means that no search can return more than 5,000 comments. For dockets with ~9k and ~22k comments, this is an issue! The GSA <a href="https://open.gsa.gov/api/regulationsgov/#there-are-strict-pagination-limits-in-v4-how-do-i-retrieve-all-comments-in-a-docket-posted-on-the-same-day-if-the-number-of-comments-is-greater-than-2500">currently recommends</a> (in beta versions of v4 of the API) that you get around these issues by sorting your search results by <code>lastModifiedDate</code>, and then running several searches in series, each of which filters out items with a <code>lastModifiedDate</code> before the most recent result in your previous search. We will need to run 2 different searches for our 9k comments, and 5 for our 22k comments</p>
-<p>The function below will assist us in paging through these searches. It gives us a page of comments, sorted by <code>lastModifiedDate</code>, from a search in which comments with a <code>lastModifiedDate</code> before <code>last_mod</code> filtered out if needed. Page size (<code>pSize</code>) defaults to the max, 250, but may be set as low as 5 (usually for testing purposes). Note that getting a page of comments on a given document requires that document’s objectID, which we will find below.</p>
-<pre class="r"><code>getAPageOfComments &lt;- function(page, objectID, last_mod = &quot;&quot;, pSize = 250){
-  if (last_mod == &quot;&quot;) {
-    url &lt;- paste0(&quot;https://api.regulations.gov/v4/comments?filter[commentOnId]=&quot;,
-                  objectID, &quot;&amp;page[size]=&quot;, pSize, &quot;&amp;page[number]=&quot;, page,
-                  &quot;&amp;sort=lastModifiedDate,documentId&amp;api_key=&quot;, api_key)
-  } else {
-    # Note that the space in the time string is replaced with '%20'
-    url &lt;- paste0(&quot;https://api.regulations.gov/v4/comments?filter[commentOnId]=&quot;,
-                  objectID, &quot;&amp;filter[lastModifiedDate][ge]=&quot;, sub(&quot; &quot;, &quot;%20&quot;, last_mod), 
-                  &quot;&amp;page[size]=&quot;, pSize, &quot;&amp;page[number]=&quot;, page, 
-                  &quot;&amp;sort=lastModifiedDate,documentId&amp;api_key=&quot;, api_key)
-  }
-  # print(paste(&quot;getting a page of comments from&quot;, url))
-  raw_comments &lt;- get_or_wait(url)  
-  comments &lt;- fromJSON(rawToChar(raw_comments$content)) 
-  return(comments)
-}</code></pre>
+<p>This effectively means that no search can return more than 5,000 comments. For dockets with ~9k and ~22k comments, this is an issue! The GSA <a href="https://open.gsa.gov/api/regulationsgov/#there-are-strict-pagination-limits-in-v4-how-do-i-retrieve-all-comments-in-a-docket-posted-on-the-same-day-if-the-number-of-comments-is-greater-than-2500">currently recommends</a> (in beta versions of v4 of the API) that you get around these issues by sorting your search results by <code>lastModifiedDate</code>, and then running several searches in series, each of which filters out items with a <code>lastModifiedDate</code> before the most recent result in your previous search. We will need to run 2 different searches for our 9k comments, and ~5 for our 22k comments.</p>
+<p>We thus repeatedly use <code>getAPageOfComments</code> to scroll through those searches. It gives us a page of comments, sorted by <code>lastModifiedDate</code>, from a search in which comments with a <code>lastModifiedDate</code> before <code>last_mod</code> can be filtered out. Page size (<code>pSize</code>) defaults to the max, 250, but may be set as low as 5 (usually for testing purposes). Note that getting a page of comments on a given document requires that document’s objectID, which we will find below.</p>
+<pre class="r"><code>if (demo) { print(getAPageOfComments) }</code></pre>
 </div>
 </div>
 <div id="targeting-the-right-comments" class="section level1">
 <h1>Targeting the right comments</h1>
 <div id="what-are-our-objectids" class="section level2">
 <h2>What are our objectIDs?</h2>
-<p>Every proposed rule, promulgated rule, comment, or supporting document has a unique <code>objectID</code>, a 16-character alphanumeric (since the only letters I’ve seen are a-f, presumably these are hexidecimal numbers somewhere in GSA’s back-end). Within a given rule-making process or “docket,” they also share a <code>docketID</code>, which is more human-readable. The <code>docketID</code>, suffixed by a hyphen and a few numerals, is also listed in each rule, comment, or supporting document as its <code>id</code>. So for instance, within the docket with <code>docketID</code> “EPA-HQ-OA-2018-0259”, we may see a proposed rule with <code>id</code> “EPA-HQ-OA-2018-0259-0001”, and a comment on said rule with <code>id</code> “EPA-HQ-OA-2018-0259-5041”, each with a unique hexadecimal <code>objectID</code></p>
-<p>We use the <code>httr</code> package to retrieve summary information for the docket ID. Here, we’re using the docket ID “EPA-HQ-OA-2018-0259” - your docket ID can be discovered by searching for your rule/proposal on <a href="regulations.gov" class="uri">regulations.gov</a>. Additionally filtering for “Proposed Rule” during the <code>GET()</code> call allows us to pull all four documents of <code>documentType</code> “Proposed Rule” in one <code>GET()</code> call (rather than paging through several pages of documents, mostly of <code>documentType</code> “Supporting &amp; Related Material”)</p>
+<p>Every proposed rule, promulgated rule, comment, notice, or supporting document has a unique <code>objectID</code>, a 16-character alphanumeric (since the only letters I’ve seen are a-f, presumably these are 8-byte hexidecimal numbers somewhere in GSA’s back-end). Within a given rule-making process or “docket,” they also share a <code>docketID</code>, which is more human-readable. The <code>docketID</code>, suffixed by a hyphen and a few numerals, is also listed in each rule, comment, or supporting document as its <code>id</code>. So for instance, within the docket with <code>docketID</code> “EPA-HQ-OA-2018-0259”, we may see a proposed rule with <code>id</code> “EPA-HQ-OA-2018-0259-0001”, and a comment on said rule with <code>id</code> “EPA-HQ-OA-2018-0259-5041”, each with a unique hexadecimal <code>objectID</code></p>
+<p>Here, we’re using the docket ID “EPA-HQ-OA-2018-0259” - your docket ID can be discovered by searching for your rule/proposal on <a href="regulations.gov" class="uri">regulations.gov</a>; it should be on the sidebar on the left on the docket’s landing page.</p>
+<p>We use the <code>httr</code> package to retrieve summary information for the docket ID. Additionally filtering for “Proposed Rule” during the <code>GET()</code> call allows us to pull all four documents of <code>documentType</code> “Proposed Rule” in one <code>GET()</code> call (rather than paging through several pages of documents, mostly of <code>documentType</code> “Supporting &amp; Related Material”)</p>
 <pre class="r"><code>docketID &lt;- &quot;EPA-HQ-OA-2018-0259&quot;
 
-if (demo) { 
-  df &lt;- get_or_wait(url = paste0(&quot;https://api.regulations.gov/v4/documents?filter[docketId]=&quot;,
-                         docketID, &quot;&amp;filter[documentType]=Proposed%20Rule&amp;api_key=&quot;,
-                         api_key)) 
-}</code></pre>
-<p>With <code>jsonlite</code> we can parse the response and identify the object IDs for proposed rule:</p>
-<pre class="r"><code>if (demo) { 
-  df2 &lt;- fromJSON(rawToChar(df$content))
-  
-  df2$data$attributes %&gt;% 
-    filter(documentType == &quot;Proposed Rule&quot;)
-}</code></pre>
-<p>We can see that the docket includes four documents of documentType “Proposed Rule”: the original one from 2018, a modified one in 2020, and one deadline extension for each.</p>
-<p>The deadline extensions do not appear to have any associated comments, and have subtype “Extension of Comment Period,” which we can use to filter them out.</p>
-<p>We can see from df2 that the <code>objectId</code> of the 2018 proposed rule is “090000648320bc9e”, and for the 2020 supplement is “0900006484450a29”. These will allow retrieval of comments through the comments endpoint of the API</p>
-<p>For now, we will focus on the 2018 proposed rule:</p>
-<pre class="r"><code>oID &lt;- &quot;0900006484450a29&quot; </code></pre>
+
+rawDocket &lt;- get_or_wait(url = paste0(&quot;https://api.regulations.gov/v4/documents?filter[docketId]=&quot;,
+                               docketID,
+                               &quot;&amp;filter[documentType]=Proposed%20Rule&amp;api_key=&quot;,
+                               api_key)) </code></pre>
+<p>With <code>jsonlite</code> we can parse the response and identify the object IDs for proposed rule. We can see that the docket includes four documents of documentType “Proposed Rule”: the original one from 2018, a modified one in 2020, and one deadline extension for each:</p>
+<pre class="r"><code>docket &lt;- fromJSON(rawToChar(rawDocket$content))
+
+docket$data$attributes</code></pre>
+<pre><code>##    documentType     lastModifiedDate highlightedContent   frDocNum withdrawn
+## 1 Proposed Rule 2020-01-30T02:01:11Z                    2018-09078     FALSE
+## 2 Proposed Rule 2020-04-17T13:37:42Z                    2020-07348     FALSE
+## 3 Proposed Rule 2020-12-31T02:06:08Z                    2020-05012     FALSE
+## 4 Proposed Rule 2018-06-25T05:21:14Z                    2018-11316     FALSE
+##   agencyId       commentEndDate
+## 1      EPA 2018-08-17T03:59:59Z
+## 2      EPA 2020-05-19T03:59:59Z
+## 3      EPA 2020-05-19T03:59:59Z
+## 4      EPA                 &lt;NA&gt;
+##                                                                                                                        title
+## 1                                                                           Strengthening Transparency in Regulatory Science
+## 2 Strengthening Transparency in Regulatory Science; Supplemental Notice of\nProposed Rulemaking; Extension of Comment Period
+## 3                                                                           Strengthening Transparency in Regulatory Science
+## 4                                                                           Strengthening Transparency in Regulatory Science
+##             postedDate            docketId
+## 1 2018-04-30T04:00:00Z EPA-HQ-OA-2018-0259
+## 2 2020-04-17T04:00:00Z EPA-HQ-OA-2018-0259
+## 3 2020-03-18T04:00:00Z EPA-HQ-OA-2018-0259
+## 4 2018-05-25T04:00:00Z EPA-HQ-OA-2018-0259
+##                                         subtype     commentStartDate
+## 1 Advance Notice of Proposed Rulemaking (ANPRM) 2018-04-30T04:00:00Z
+## 2                   Extension of Comment Period 2020-04-17T04:00:00Z
+## 3                                          &lt;NA&gt; 2020-03-18T04:00:00Z
+## 4                   Extension of Comment Period                 &lt;NA&gt;
+##   openForComment         objectId
+## 1          FALSE 090000648320bc9e
+## 2          FALSE 09000064844b0e2f
+## 3          FALSE 0900006484450a29
+## 4          FALSE 09000064832ec7f9</code></pre>
+<pre class="r"><code>proposedRules &lt;- docket$data$attributes %&gt;% 
+    filter(is.na(subtype) | subtype != &quot;Extension of Comment Period&quot;)</code></pre>
+<p>The deadline extensions don’t have any comments (caveat: they may on other dockets), so by filtering out those with <code>subtype</code> “Extension of Comment Period” we can get the list of <code>objectId</code>s.</p>
+<p>The <code>objectId</code> of the 2018 proposed rule is “090000648320bc9e”, and for the 2020 supplement is “0900006484450a29”. These will allow retrieval of comments through the comments endpoint of the API</p>
+<p>For now, we will focus on the 2018 proposed rule</p>
+<pre class="r"><code>oIDs &lt;- proposedRules$objectId
+
+oID &lt;- oIDs[1]</code></pre>
+<p>You can replicate the above process using the function <code>getOIDs()</code> in the helper functions</p>
 </div>
 <div id="how-many-comments" class="section level2">
 <h2>How many comments?</h2>
 <p>We will also want to know how many comments we can expect. To do this, we request a page of comments on our proposed rule using its objectID. Note that the URL in this request only returns (in <code>$data</code>) the first page of comments meeting the requested criteria (pages default to 25 comments long), but since we are only interested in the <code>totalElements</code> field (in <code>meta</code>), this does not concern us for now.</p>
-<pre class="r"><code>getCommentCount &lt;- function(objectID){
-  url &lt;- paste0(&quot;https://api.regulations.gov/v4/comments?filter[commentOnId]=&quot;,
-                objectID, &quot;&amp;api_key=&quot;, api_key)
-  
-  raw_comments &lt;- get_or_wait(url)
-  comments &lt;- fromJSON(rawToChar(raw_comments$content))
-  return(comments$meta$totalElements)
-}
-
-# get the comment count (will be useful below)
+<pre class="r"><code># get the comment count (will be useful below)
 commentCount &lt;- getCommentCount(oID)
-if(demo){ commentCount }</code></pre>
+if(demo){ 
+  print(getCommentCount) 
+  print(paste(&quot;commentCount =&quot;, commentCount))
+  }</code></pre>
 </div>
 <div id="exploring-a-single-comment" class="section level2">
 <h2>Exploring a single comment</h2>
-<p>When we get a page of comments with an API call like in <code>getAPageOfComments()</code> above, we only get limited information about each comment. To get more details, including the content of the comment and its attachments, we need to request the data at each of the urls in <code>$data$links$self</code> in turn. For a page of 25 comments, <code>$data$links$self</code> will be a list of 25 links, each of which we can pass to the <code>getCommentByUrl()</code> function below.</p>
-<pre class="r"><code>getCommentByUrl &lt;- function(link){
-  raw_comment &lt;- get_or_wait(paste0(link, &quot;?include=attachments&amp;api_key=&quot;, api_key))
-  comment &lt;- fromJSON(rawToChar(raw_comment$content))
-}
-
-# run the below code to explore the structure of the first comment on the first page
+<p>When we get a page of comments with an API call like in <code>getAPageOfComments()</code> above, we only get limited information about each comment. To get more details, including the content of the comment and its attachments, we need to request the data at each of the comments’ URLs (in <code>$data$links$self</code>) in turn. For a page of 25 comments, <code>$data$links$self</code> will be a list of 25 links, each of which we can pass to the <code>getCommentByUrl()</code> function.</p>
+<pre class="r"><code># run the below code to explore the structure of the 1st comment on the 1st page
 if(demo){
   url &lt;- paste0(&quot;https://api.regulations.gov/v4/comments?filter[commentOnId]=&quot;,
                 oID, &quot;&amp;api_key=&quot;, api_key)
@@ -542,1389 +514,93 @@ if(demo){
 </div>
 <div id="downloading-attachments" class="section level1">
 <h1>Downloading attachments</h1>
-<p>Each comment’s details provide link to the attachments for download. Often, there is just a single attachment: the text of the comment; the comment itself will either duplicate this attachment of say something like “see attached.” Nevertheless, when we save and return the full text of a comment, we want both the comment body and the content of any attachments. This provides that. All attachments, as well as fullText.txt, are both saved in the directory <code>attachments/id</code> where ID is the more human readable ID (the docket ID suffixed with a hyphen and a few numerals). The function also returns the full text, which we will place in a data frame for future analysis.</p>
-<p>Most of the body of the getAttachmentDetails function is devoted to handling various rare edge cases:</p>
+<p>Each comment’s details provide links to the attachments for download. Often, there is just a single attachment: the text of the comment. In such cases, the comment itself will either duplicate this attachment of say something like “see attached.” Nevertheless, when we save and return the full text of a comment, we want both the comment body and the content of any attachments. The function <code>getAttachmentDetails()</code> provides that, along with some other characterization.</p>
+<p>This function takes a comment (in the list-of-lists form provided by the API), and returns a list <code>localAttributes</code> of the data listed below. It also takes a directory name <code>destdir</code> (default <code>&quot;attachments&quot;</code>). If the boolean argument <code>doDownload</code> is <code>TRUE</code> (the default), it downloads the attachments a subdirectory of <code>destdir</code> named after the comment’s ID (<em>eg.</em> attachments/EPA-HQ-OA-2018-0259-1234); otherwise, it assumes you have already downloaded all attachments (or at least the non-restricted PDFs) to that subdirectory.</p>
 <ol style="list-style-type: decimal">
+<li><p><code>$fullText</code> is the text of everything including the comment body all attachments. At this point all restricted files and all non-PDF files are skipped.</p></li>
+<li><p><code>$coverAndComment</code> contains the text of the comment body, and of “Comment.pdf” if it exists</p>
+<ul>
+<li>this will catch the content of many, but by no means all comments where the body either duplicates or merely directs the reader to an attached comment, while excluding supplementary material</li>
+</ul></li>
+<li><p><code>$attachmentCount</code> is the total number of attachments (whether or not they could be downloaded/parsed)</p></li>
+<li><p><code>$nonPdfs</code> is the number of attachments that are not PDFs (<em>ie.</em> that pdftools cannot parse)</p></li>
+<li><p><code>$restricteds</code> is the number of restricted documents (which cannot be downloaded)</p></li>
+<li><p><code>$authorName</code> attempts to parse the name of the comment’s author from the title of the comment, using <code>getAuthorName()</code>. If it can’t, the function simply uses the entire title. This works on comments for the EPA proposed rules I’ve seen, but for other sorts of comments it may produce a field that mostly just replicates the “title” field</p></li>
+</ol>
+<p>Most of the body of the <code>getAttachmentDetails()</code> function and the functions it calls are devoted to handling various rare but significant edge cases:</p>
+<ul>
 <li><p>restricted (often copyrighted) attachments</p></li>
 <li><p>non-pdf files (which we aren’t yet parsing)</p></li>
 <li><p>files are occasionally available in multiple formats, which may or may not include our chosen format</p></li>
 <li><p>we may also occasionally encounter items that are not attachments, but I have not encountered this.</p></li>
-</ol>
-<p>While downloading, we’re going to extract a few attributes for later analysis - returned as a list localAttributes</p>
-<ol style="list-style-type: decimal">
-<li><p>$fullText is the content of everything including all attachments</p></li>
-<li><p>$coverAndComment contains the text of the content body, and of “comment.pdf” if it exists - this will catch the content many, but by no means all comments where the body either duplicates or merely directs the reader to an attached comment, while excluding supplementary material</p></li>
-<li><p>$attachmentCount should be obvious</p></li>
-<li><p>$nonPdfs is the number of attachements that are not pdfs</p></li>
-<li><p>$restricteds is the number of restricted documents</p></li>
-<li><p>$authorName attempts to parse the name of the comment’s author from the title of the comment, using getAuthorName(). If it can’t, it simply uses the entire title. This works on comments for the EPA proposed rules I’ve seen, but for other sorts of comments it may produce a field that merely replicates the “title” field</p></li>
-</ol>
-<pre class="r"><code>getCommentById &lt;- function(id) {
-  url &lt;- paste0(&quot;https://api.regulations.gov/v4/comments/&quot;, id)
-  return(getCommentByUrl(url))
-} # Ready
-
-getAuthorName &lt;- function(comment) {
-  title &lt;- comment$data$attributes$title
-  if (startsWith(title, &quot;Anonymous&quot;)) {return(&quot;Anonymous&quot;)}
-  if (startsWith(title, &quot;Mass Comment Campaign Sponsored&quot;)) {
-    return(paste(substr(title, 36, 1000), &quot;(mass mail)&quot;))
-  }
-  if (startsWith(title, &quot;Mass Comment Campaign sponsored&quot;)) {
-    return(paste(substr(title, 36, 1000), &quot;(mass mail)&quot;))
-  }
-  if (startsWith(title, &quot;Mass Comment Campaign sponsoring organization unknown&quot;)) {
-    return(&quot;unknown organization (mass mail)&quot;)
-  }
-  if (startsWith(title, &quot;Comment submitted by&quot;)) {
-    return (substr(title, 22, 1000))
-  }
-  
-  # if we haven't met the previous patterns, give up
-  return(title)
-} # Ready 
-
-filenameFromTitle &lt;- function(j, title, format = &quot;pdf&quot;, maxLen = 64) {
-  # to avoid path errors, we replace &quot;/&quot; with &quot;-&quot; 
-  filename &lt;- paste0(sprintf(&quot;a%02d_&quot;, j), gsub(&quot;/&quot;, &quot;-&quot;,title))
-  if (nchar(title) &gt; maxLen) {title &lt;- substr(title, 1, maxLen)}
-  return(paste0(filename, &quot;.&quot;, format))
-} # Ready
-
-filenamesFromComment &lt;- function(comment, maxLen = 64) {
-
-  N &lt;- length(comment$included$id)
-  filenames = rep(NA, N)
-  for (i in 1:N) {
-    availableFormats &lt;- comment[[&quot;included&quot;]][[&quot;attributes&quot;]][[&quot;fileFormats&quot;]][[i]][[2]]
-    if (&quot;pdf&quot; %in% availableFormats) {
-      itemFormat &lt;- &quot;pdf&quot;
-      fi &lt;- match(&quot;pdf&quot;, availableFormats)
-    } else {
-      itemFormat &lt;- availableFormats[1]
-      fi &lt;- 1
-    }
-    filenames[i] &lt;- filenameFromTitle(comment$included$attributes$docOrder[i], 
-                                      comment$included$attributes$title[i],
-                                      format = itemFormat, maxLen = maxLen)
-  }
-  return(filenames)
-}
-
-# Downloads attachments from the web, and returns some details about them
-downloadAttachmentsTo &lt;- function(comment, pathPrefix = &quot;test&quot;) {
-  
-  if (!dir.exists(pathPrefix)) { dir.create(pathPrefix) }
-  
-  # if the attachments consist of a single, restricted file we need to run a different test
-  if (is.na(comment$included$attributes$fileFormats)[1]) { 
-    message(&quot;WARNING: sole attachment could not be downloaded from comment &quot;,
-            comment$data$id, &quot;, perhaps because of restrictReasonType: &quot;, 
-            comment$included$attributes$restrictReasonType[1])
-    return()
-  }  
-  
-  filenames &lt;- filenamesFromComment(comment)
-  N &lt;- length(filenames)
-
-  for (i in 1:N) {
-    
-    # tests if the file is restricted. 
-    if (is.null(comment$included$attributes$fileFormats[[i]])) { # &gt;1 attchmt
-      message(&quot;WARNING: attachment &quot;, i, &quot; could not be downloaded from comment &quot;,
-                comment$data$id, &quot;, perhaps because of restrictReasonType: &quot;, 
-                comment$included$attributes$restrictReasonType[i])
-      next
-    }
-    
-    itemFormat &lt;- slug(filenames[i], sep = &quot;\\.&quot;)
-
-    # Warn the user if the file is not marked as an attachment or is not a pdf
-    # I've never seen the former come up but I'd sure want a warning if it did!
-    if (comment$included$type[i] != &quot;attachments&quot;) {
-      message(&quot;WARNING: item &quot;, i, &quot;'s type in comment &quot;, comment$data$id,
-                 &quot; is not 'attachments' but&quot;, comment$included$type) 
-    }
-    if (itemFormat != &quot;pdf&quot;) {
-      message(&quot;WARNING: item #&quot;, i, &quot;: &quot;, filenames[i], &quot; is not pdf but &quot;, itemFormat)
-    }
-    
-    destpath &lt;- paste(pathPrefix, filenames[i], sep = &quot;/&quot;)
-    
-    # print(paste0(&quot;found &quot;, filename, &quot; an &quot;, comment$included$type[i], &quot; with format &quot;,
-    # itemFormat))
-    
-    # download the file to the targeted path
-    
-    # first we need to make sure we're grabbing the URL with the right extension
-    links &lt;- as.list(comment$included$attributes$fileFormats[[i]]$fileUrl)
-    pattern &lt;- paste0(&quot;*\\.&quot;, itemFormat)
-    link &lt;- links[grepl(pattern, links)]
-    suppressMessages(download.file(link[[1]], destfile = destpath, mode = &quot;wb&quot;, quiet = TRUE))
-  
-  }
-    # TODO: combine all downloaded files into one big file PDF - but idk if that's needed rn
-
-}
-
-# Returns a list of &quot;local&quot; attributes, and downloads the comments if &quot;download&quot; is true
-# Should call either downloadAttachmentsTo or loadAttachmentsFrom to grab the attachment text
-getAttachmentDetails &lt;- function(comment, destdir = &quot;attachments&quot;, doDownload = TRUE){
-
-  # attachments will be stored in destdir/commentId
-  pathPrefix &lt;- paste(destdir, comment$data$id, sep = &quot;/&quot;)
-
-  # The below may go into the downloadAttachmentsTo function
-  if (doDownload) {
-    if (!dir.exists(destdir)) { dir.create(destdir) }
-    if (!dir.exists(pathPrefix)) { dir.create(pathPrefix) }
-  }
-  
-  localAttributes &lt;- list(fullText = &quot;&quot;, coverAndComment = &quot;&quot;, attachmentCount = 0, 
-                          nonPdfs = 0, restricteds = 0, authorName = getAuthorName(comment))
-  
-  # fullText.txt header
-  textFName &lt;- paste(pathPrefix, &quot;fullText.txt&quot;, sep = &quot;/&quot;)
-
-  cat(&quot;Full text of comment&quot;, comment$data$id, 
-      &quot;\nAuthor:&quot;, localAttributes$authorName, &quot;\n\n&quot;, 
-      file = textFName, append = FALSE)
-  
-  # add comment to fullText.txt
-  cat(comment$data$attributes$comment, file = textFName, append = TRUE)
-  
-  # if there aren't attachments, you have the data you need
-  if (is.null(comment$included)) {
-    text &lt;- readChar(textFName, file.info(textFName)$size)
-    localAttributes$fullText &lt;- text
-    localAttributes$coverAndComment &lt;- text
-    return(localAttributes)
-  } 
-  # if there are attachments, add them to the directory and to the fullText string
-
-  # get the attachments if needed
-  if (doDownload) { downloadAttachmentsTo(comment, pathPrefix = pathPrefix) }
-
-  # get the text of Comment.pdf if it exists
-  
-  fileList &lt;- list.files(path = pathPrefix)
-  # message(paste(fileList, sep = &quot; &quot;))
-  
-  attachmentList &lt;- fileList[!grepl(&quot;fullText\\.txt&quot;, fileList)]
-  commentPdf &lt;- attachmentList[grepl(&quot;a\\d\\d_Comment\\.pdf&quot;, attachmentList)]
-  if (length(commentPdf)) {
-    commentPdfText &lt;- paste(pdf_text(paste(pathPrefix, commentPdf, sep = &quot;/&quot;)), 
-                            collapse = &quot;&quot;, sep = &quot;/n&quot;)
-    cat(&quot;\n\n---\nAttached Comment:\n---\n\n&quot;, commentPdfText, file = textFName, append = TRUE)    
-  }
-  localAttributes$coverAndComment &lt;- readChar(textFName, file.info(textFName)$size)
-  # message(&quot;added Comment.pdf (if any)\n&quot;)
-  # add a list of non-parsed attachments
-  
-  nonPdfs &lt;- attachmentList[!grepl(&quot;*\\.pdf&quot;, attachmentList)]
-  if (length(nonPdfs)) {
-    cat(&quot;\n\n---\nCould not parse:&quot;, nonPdfs, sep = &quot;\n&quot;, file = textFName, append = TRUE)
-    message(paste(&quot;WARNING: found&quot;, length(nonPdfs), &quot;unparseable files:\n&quot;, 
-                  paste(nonPdfs, sep = &quot;\n&quot;)))
-  }
-  localAttributes$nonPdfs &lt;- length(nonPdfs)
-  # message(localAttributes$nonPdfs, &quot;non-PDF files\n&quot;)
-  
-  # add a list of restricted attachments
-  
-  restrictedStatus &lt;- comment$included$attributes$restrictReasonType
-  names(restrictedStatus) &lt;- comment$included$attributes$title
-  restricted &lt;- restrictedStatus[!is.na(restrictedStatus)]
-  if (length(restricted)) {
-    cat(&quot;\n\n---\nRestricted files:\n&quot;, restricted, file = textFName, append = TRUE)
-    message(&quot;WARNING: found &quot;, length(restricted), &quot; restricted files:&quot;)
-    for (i in 1:length(restricted)) {
-      cat(names(restricted)[i], &quot;: &quot;, restricted[i], &quot;\n&quot;, file = textFName, append = TRUE)
-    }
-  }
-  localAttributes$restricteds &lt;- length(restricted)
-  # message(length(restricted), &quot; restricted files\n&quot;)
-
-  # add the text of other attachments
-  allPdfs &lt;- attachmentList[grepl(&quot;*\\.pdf&quot;, attachmentList)]
-  otherPdfs &lt;- allPdfs[!grepl(&quot;a\\d\\d_Comment\\.pdf&quot;, allPdfs)]
-  for (f in otherPdfs) {
-    attachmentText &lt;- paste(pdf_text(paste(pathPrefix, f, sep = &quot;/&quot;)), collapse = &quot;&quot;, sep = &quot;/n&quot;)
-    j &lt;- substr(f, 2, 3)
-    title &lt;- substr(f, 5, nchar(f) - 4)
-    cat(&quot;\n\n---\n&quot;, &quot;Attachment&quot;, j, &quot;title:\n&quot;, title, &quot;\n---\n\n&quot;, attachmentText, 
-        file = textFName, append = TRUE)
-  }
-  # message(length(otherPdfs), &quot; other PDFs added\n&quot;)
-  
-  localAttributes$fullText &lt;- readChar(textFName, file.info(textFName)$size)
-  
-  return(localAttributes)
-} 
-
-testDownload &lt;- function(id) {
+</ul>
+<p><strong>For more on these and other edge cases in the data, see the README file</strong> (once I’ve added that info ¯\_ (ツ)_/¯)</p>
+<pre class="r"><code>testDownload &lt;- function(id) {
   comment &lt;- getCommentById(id)
-  localAtts &lt;- getAttachmentDetails(comment)
+  localAtts &lt;- getAttachmentDetails(comment, doDownload = TRUE)
   return(c(localAtts, comment))
 } 
 
-
 if (demo) {
-  c1037 &lt;- testDownload(&quot;EPA-HQ-OA-2018-0259-1037&quot;) # multiple attachments, 1 restricted
-  c0066 &lt;- testDownload(&quot;EPA-HQ-OAR-2020-0532-0066&quot;) # multiple attachments, none restricted; #13 needs OCR
-  c0445 &lt;- testDownload(&quot;EPA-HQ-OA-2018-0259-0445&quot;) # single, restricted (copyrighted) attachment
-  c0684 &lt;- testDownload(&quot;EPA-HQ-OA-2018-0259-0684&quot;) # single, restricted (other) attachment
-  c0671 &lt;- testDownload(&quot;EPA-HQ-OA-2018-0259-0671&quot;) # attachment is docx, not pdf
-  c1388 &lt;- testDownload(&quot;EPA-HQ-OA-2018-0259-1388&quot;) # no attachment (comment body only)
-  c9240 &lt;- testDownload(&quot;EPA-HQ-OA-2018-0259-9240&quot;) # slashes in filename
-  c8272 &lt;- testDownload(&quot;EPA-HQ-OA-2018-0259-8272&quot;) # 14 attchmts but document order skips 12 and reaches 15
-  c9299 &lt;- testDownload(&quot;EPA-HQ-OA-2018-0259-9299&quot;) # very long document title
+  c1037 &lt;- testDownload(&quot;EPA-HQ-OA-2018-0259-1037&quot;) 
+  # multiple attachments, 1 restricted
+  
+  c0066 &lt;- testDownload(&quot;EPA-HQ-OAR-2020-0532-0066&quot;) 
+  # multiple attachments, none restricted; #13 needs OCR
+  
+  c0445 &lt;- testDownload(&quot;EPA-HQ-OA-2018-0259-0445&quot;) 
+  # single, restricted (copyrighted) attachment
+  
+  c0684 &lt;- testDownload(&quot;EPA-HQ-OA-2018-0259-0684&quot;) 
+  # single, restricted (other) attachment
+  
+  c0671 &lt;- testDownload(&quot;EPA-HQ-OA-2018-0259-0671&quot;) 
+  # attachment is docx, not pdf
+  
+  c1388 &lt;- testDownload(&quot;EPA-HQ-OA-2018-0259-1388&quot;) 
+  # no attachment (comment body only)
+  
+  c9240 &lt;- testDownload(&quot;EPA-HQ-OA-2018-0259-9240&quot;) 
+  # slashes in filename
+  
+  c8272 &lt;- testDownload(&quot;EPA-HQ-OA-2018-0259-8272&quot;) 
+  # 14 attchmts but document order skips 12 and reaches 15
+  
+  c9299 &lt;- testDownload(&quot;EPA-HQ-OA-2018-0259-9299&quot;) 
+  # very long document title
 }</code></pre>
-<p>The <code>if</code> statement above pulls some comments I have found useful for testing various edge cases</p>
+<p>The <code>if</code> statement above downloads the attachments and returns the details for some comments I have found useful for testing various edge cases</p>
 </div>
 <div id="putting-it-together" class="section level1">
 <h1>Putting it together</h1>
 <div id="page-by-page-and-batch-by-batch" class="section level2">
 <h2>Page by page and batch by batch</h2>
-<p>The below uses nested loops in the form:</p>
-<p><code>while (not enough comments) {</code></p>
-<p><code>for (each page in a batch) {</code></p>
-<p><code>for (each comment on a page) {do stuff}}}}</code></p>
-<p>to add comments one by one to a data frame that carries their <code>attributes</code>, both those pulled from the comment itself and from the getAttachmentDetails() function.</p>
-<pre><code>## Warning in commentList[commentsAdded] &lt;- comment: number of items to replace is
-## not a multiple of replacement length
-
-## Warning in commentList[commentsAdded] &lt;- comment: number of items to replace is
-## not a multiple of replacement length
-
-## Warning in commentList[commentsAdded] &lt;- comment: number of items to replace is
-## not a multiple of replacement length
-
-## Warning in commentList[commentsAdded] &lt;- comment: number of items to replace is
-## not a multiple of replacement length
-
-## Warning in commentList[commentsAdded] &lt;- comment: number of items to replace is
-## not a multiple of replacement length
-
-## Warning in commentList[commentsAdded] &lt;- comment: number of items to replace is
-## not a multiple of replacement length
-
-## Warning in commentList[commentsAdded] &lt;- comment: number of items to replace is
-## not a multiple of replacement length
-
-## Warning in commentList[commentsAdded] &lt;- comment: number of items to replace is
-## not a multiple of replacement length
-
-## Warning in commentList[commentsAdded] &lt;- comment: number of items to replace is
-## not a multiple of replacement length
-
-## Warning in commentList[commentsAdded] &lt;- comment: number of items to replace is
-## not a multiple of replacement length
-
-## Warning in commentList[commentsAdded] &lt;- comment: number of items to replace is
-## not a multiple of replacement length
-
-## Warning in commentList[commentsAdded] &lt;- comment: number of items to replace is
-## not a multiple of replacement length
-
-## Warning in commentList[commentsAdded] &lt;- comment: number of items to replace is
-## not a multiple of replacement length
-
-## Warning in commentList[commentsAdded] &lt;- comment: number of items to replace is
-## not a multiple of replacement length
-
-## Warning in commentList[commentsAdded] &lt;- comment: number of items to replace is
-## not a multiple of replacement length
-
-## Warning in commentList[commentsAdded] &lt;- comment: number of items to replace is
-## not a multiple of replacement length
-
-## Warning in commentList[commentsAdded] &lt;- comment: number of items to replace is
-## not a multiple of replacement length
-
-## Warning in commentList[commentsAdded] &lt;- comment: number of items to replace is
-## not a multiple of replacement length
-
-## Warning in commentList[commentsAdded] &lt;- comment: number of items to replace is
-## not a multiple of replacement length
-
-## Warning in commentList[commentsAdded] &lt;- comment: number of items to replace is
-## not a multiple of replacement length
-
-## Warning in commentList[commentsAdded] &lt;- comment: number of items to replace is
-## not a multiple of replacement length
-
-## Warning in commentList[commentsAdded] &lt;- comment: number of items to replace is
-## not a multiple of replacement length
-
-## Warning in commentList[commentsAdded] &lt;- comment: number of items to replace is
-## not a multiple of replacement length
-
-## Warning in commentList[commentsAdded] &lt;- comment: number of items to replace is
-## not a multiple of replacement length
-
-## Warning in commentList[commentsAdded] &lt;- comment: number of items to replace is
-## not a multiple of replacement length
-
-## Warning in commentList[commentsAdded] &lt;- comment: number of items to replace is
-## not a multiple of replacement length
-
-## Warning in commentList[commentsAdded] &lt;- comment: number of items to replace is
-## not a multiple of replacement length
-
-## Warning in commentList[commentsAdded] &lt;- comment: number of items to replace is
-## not a multiple of replacement length
-
-## Warning in commentList[commentsAdded] &lt;- comment: number of items to replace is
-## not a multiple of replacement length
-
-## Warning in commentList[commentsAdded] &lt;- comment: number of items to replace is
-## not a multiple of replacement length
-
-## Warning in commentList[commentsAdded] &lt;- comment: number of items to replace is
-## not a multiple of replacement length
-
-## Warning in commentList[commentsAdded] &lt;- comment: number of items to replace is
-## not a multiple of replacement length
-
-## Warning in commentList[commentsAdded] &lt;- comment: number of items to replace is
-## not a multiple of replacement length
-
-## Warning in commentList[commentsAdded] &lt;- comment: number of items to replace is
-## not a multiple of replacement length
-
-## Warning in commentList[commentsAdded] &lt;- comment: number of items to replace is
-## not a multiple of replacement length
-
-## Warning in commentList[commentsAdded] &lt;- comment: number of items to replace is
-## not a multiple of replacement length
-
-## Warning in commentList[commentsAdded] &lt;- comment: number of items to replace is
-## not a multiple of replacement length
-
-## Warning in commentList[commentsAdded] &lt;- comment: number of items to replace is
-## not a multiple of replacement length
-
-## Warning in commentList[commentsAdded] &lt;- comment: number of items to replace is
-## not a multiple of replacement length
-
-## Warning in commentList[commentsAdded] &lt;- comment: number of items to replace is
-## not a multiple of replacement length
-
-## Warning in commentList[commentsAdded] &lt;- comment: number of items to replace is
-## not a multiple of replacement length
-
-## Warning in commentList[commentsAdded] &lt;- comment: number of items to replace is
-## not a multiple of replacement length
-
-## Warning in commentList[commentsAdded] &lt;- comment: number of items to replace is
-## not a multiple of replacement length
-
-## Warning in commentList[commentsAdded] &lt;- comment: number of items to replace is
-## not a multiple of replacement length
-
-## Warning in commentList[commentsAdded] &lt;- comment: number of items to replace is
-## not a multiple of replacement length
-
-## Warning in commentList[commentsAdded] &lt;- comment: number of items to replace is
-## not a multiple of replacement length
-
-## Warning in commentList[commentsAdded] &lt;- comment: number of items to replace is
-## not a multiple of replacement length
-
-## Warning in commentList[commentsAdded] &lt;- comment: number of items to replace is
-## not a multiple of replacement length
-
-## Warning in commentList[commentsAdded] &lt;- comment: number of items to replace is
-## not a multiple of replacement length
-
-## Warning in commentList[commentsAdded] &lt;- comment: number of items to replace is
-## not a multiple of replacement length
-
-## Warning in commentList[commentsAdded] &lt;- comment: number of items to replace is
-## not a multiple of replacement length
-
-## Warning in commentList[commentsAdded] &lt;- comment: number of items to replace is
-## not a multiple of replacement length
-
-## Warning in commentList[commentsAdded] &lt;- comment: number of items to replace is
-## not a multiple of replacement length
-
-## Warning in commentList[commentsAdded] &lt;- comment: number of items to replace is
-## not a multiple of replacement length
-
-## Warning in commentList[commentsAdded] &lt;- comment: number of items to replace is
-## not a multiple of replacement length
-
-## Warning in commentList[commentsAdded] &lt;- comment: number of items to replace is
-## not a multiple of replacement length
-
-## Warning in commentList[commentsAdded] &lt;- comment: number of items to replace is
-## not a multiple of replacement length
-
-## Warning in commentList[commentsAdded] &lt;- comment: number of items to replace is
-## not a multiple of replacement length
-
-## Warning in commentList[commentsAdded] &lt;- comment: number of items to replace is
-## not a multiple of replacement length
-
-## Warning in commentList[commentsAdded] &lt;- comment: number of items to replace is
-## not a multiple of replacement length
-
-## Warning in commentList[commentsAdded] &lt;- comment: number of items to replace is
-## not a multiple of replacement length
-
-## Warning in commentList[commentsAdded] &lt;- comment: number of items to replace is
-## not a multiple of replacement length
-
-## Warning in commentList[commentsAdded] &lt;- comment: number of items to replace is
-## not a multiple of replacement length
-
-## Warning in commentList[commentsAdded] &lt;- comment: number of items to replace is
-## not a multiple of replacement length
-
-## Warning in commentList[commentsAdded] &lt;- comment: number of items to replace is
-## not a multiple of replacement length
-
-## Warning in commentList[commentsAdded] &lt;- comment: number of items to replace is
-## not a multiple of replacement length
-
-## Warning in commentList[commentsAdded] &lt;- comment: number of items to replace is
-## not a multiple of replacement length
-
-## Warning in commentList[commentsAdded] &lt;- comment: number of items to replace is
-## not a multiple of replacement length
-
-## Warning in commentList[commentsAdded] &lt;- comment: number of items to replace is
-## not a multiple of replacement length
-
-## Warning in commentList[commentsAdded] &lt;- comment: number of items to replace is
-## not a multiple of replacement length
-
-## Warning in commentList[commentsAdded] &lt;- comment: number of items to replace is
-## not a multiple of replacement length
-
-## Warning in commentList[commentsAdded] &lt;- comment: number of items to replace is
-## not a multiple of replacement length
-
-## Warning in commentList[commentsAdded] &lt;- comment: number of items to replace is
-## not a multiple of replacement length
-
-## Warning in commentList[commentsAdded] &lt;- comment: number of items to replace is
-## not a multiple of replacement length
-
-## Warning in commentList[commentsAdded] &lt;- comment: number of items to replace is
-## not a multiple of replacement length
-
-## Warning in commentList[commentsAdded] &lt;- comment: number of items to replace is
-## not a multiple of replacement length
-
-## Warning in commentList[commentsAdded] &lt;- comment: number of items to replace is
-## not a multiple of replacement length
-
-## Warning in commentList[commentsAdded] &lt;- comment: number of items to replace is
-## not a multiple of replacement length
-
-## Warning in commentList[commentsAdded] &lt;- comment: number of items to replace is
-## not a multiple of replacement length
-
-## Warning in commentList[commentsAdded] &lt;- comment: number of items to replace is
-## not a multiple of replacement length
-
-## Warning in commentList[commentsAdded] &lt;- comment: number of items to replace is
-## not a multiple of replacement length
-
-## Warning in commentList[commentsAdded] &lt;- comment: number of items to replace is
-## not a multiple of replacement length
-
-## Warning in commentList[commentsAdded] &lt;- comment: number of items to replace is
-## not a multiple of replacement length
-
-## Warning in commentList[commentsAdded] &lt;- comment: number of items to replace is
-## not a multiple of replacement length
-
-## Warning in commentList[commentsAdded] &lt;- comment: number of items to replace is
-## not a multiple of replacement length
-
-## Warning in commentList[commentsAdded] &lt;- comment: number of items to replace is
-## not a multiple of replacement length
-
-## Warning in commentList[commentsAdded] &lt;- comment: number of items to replace is
-## not a multiple of replacement length
-
-## Warning in commentList[commentsAdded] &lt;- comment: number of items to replace is
-## not a multiple of replacement length
-
-## Warning in commentList[commentsAdded] &lt;- comment: number of items to replace is
-## not a multiple of replacement length
-
-## Warning in commentList[commentsAdded] &lt;- comment: number of items to replace is
-## not a multiple of replacement length
-
-## Warning in commentList[commentsAdded] &lt;- comment: number of items to replace is
-## not a multiple of replacement length
-
-## Warning in commentList[commentsAdded] &lt;- comment: number of items to replace is
-## not a multiple of replacement length
-
-## Warning in commentList[commentsAdded] &lt;- comment: number of items to replace is
-## not a multiple of replacement length
-
-## Warning in commentList[commentsAdded] &lt;- comment: number of items to replace is
-## not a multiple of replacement length
-
-## Warning in commentList[commentsAdded] &lt;- comment: number of items to replace is
-## not a multiple of replacement length
-
-## Warning in commentList[commentsAdded] &lt;- comment: number of items to replace is
-## not a multiple of replacement length
-
-## Warning in commentList[commentsAdded] &lt;- comment: number of items to replace is
-## not a multiple of replacement length
-
-## Warning in commentList[commentsAdded] &lt;- comment: number of items to replace is
-## not a multiple of replacement length
-
-## Warning in commentList[commentsAdded] &lt;- comment: number of items to replace is
-## not a multiple of replacement length
-
-## Warning in commentList[commentsAdded] &lt;- comment: number of items to replace is
-## not a multiple of replacement length
-
-## Warning in commentList[commentsAdded] &lt;- comment: number of items to replace is
-## not a multiple of replacement length
-
-## Warning in commentList[commentsAdded] &lt;- comment: number of items to replace is
-## not a multiple of replacement length
-
-## Warning in commentList[commentsAdded] &lt;- comment: number of items to replace is
-## not a multiple of replacement length
-
-## Warning in commentList[commentsAdded] &lt;- comment: number of items to replace is
-## not a multiple of replacement length
-
-## Warning in commentList[commentsAdded] &lt;- comment: number of items to replace is
-## not a multiple of replacement length
-
-## Warning in commentList[commentsAdded] &lt;- comment: number of items to replace is
-## not a multiple of replacement length
-
-## Warning in commentList[commentsAdded] &lt;- comment: number of items to replace is
-## not a multiple of replacement length
-
-## Warning in commentList[commentsAdded] &lt;- comment: number of items to replace is
-## not a multiple of replacement length
-
-## Warning in commentList[commentsAdded] &lt;- comment: number of items to replace is
-## not a multiple of replacement length
-
-## Warning in commentList[commentsAdded] &lt;- comment: number of items to replace is
-## not a multiple of replacement length
-
-## Warning in commentList[commentsAdded] &lt;- comment: number of items to replace is
-## not a multiple of replacement length
-
-## Warning in commentList[commentsAdded] &lt;- comment: number of items to replace is
-## not a multiple of replacement length
-
-## Warning in commentList[commentsAdded] &lt;- comment: number of items to replace is
-## not a multiple of replacement length
-
-## Warning in commentList[commentsAdded] &lt;- comment: number of items to replace is
-## not a multiple of replacement length
-
-## Warning in commentList[commentsAdded] &lt;- comment: number of items to replace is
-## not a multiple of replacement length
-
-## Warning in commentList[commentsAdded] &lt;- comment: number of items to replace is
-## not a multiple of replacement length
-
-## Warning in commentList[commentsAdded] &lt;- comment: number of items to replace is
-## not a multiple of replacement length
-
-## Warning in commentList[commentsAdded] &lt;- comment: number of items to replace is
-## not a multiple of replacement length
-
-## Warning in commentList[commentsAdded] &lt;- comment: number of items to replace is
-## not a multiple of replacement length
-
-## Warning in commentList[commentsAdded] &lt;- comment: number of items to replace is
-## not a multiple of replacement length
-
-## Warning in commentList[commentsAdded] &lt;- comment: number of items to replace is
-## not a multiple of replacement length
-
-## Warning in commentList[commentsAdded] &lt;- comment: number of items to replace is
-## not a multiple of replacement length
-
-## Warning in commentList[commentsAdded] &lt;- comment: number of items to replace is
-## not a multiple of replacement length
-
-## Warning in commentList[commentsAdded] &lt;- comment: number of items to replace is
-## not a multiple of replacement length
-
-## Warning in commentList[commentsAdded] &lt;- comment: number of items to replace is
-## not a multiple of replacement length
-
-## Warning in commentList[commentsAdded] &lt;- comment: number of items to replace is
-## not a multiple of replacement length
-
-## Warning in commentList[commentsAdded] &lt;- comment: number of items to replace is
-## not a multiple of replacement length
-
-## Warning in commentList[commentsAdded] &lt;- comment: number of items to replace is
-## not a multiple of replacement length
-
-## Warning in commentList[commentsAdded] &lt;- comment: number of items to replace is
-## not a multiple of replacement length
-
-## Warning in commentList[commentsAdded] &lt;- comment: number of items to replace is
-## not a multiple of replacement length
-
-## Warning in commentList[commentsAdded] &lt;- comment: number of items to replace is
-## not a multiple of replacement length
-
-## Warning in commentList[commentsAdded] &lt;- comment: number of items to replace is
-## not a multiple of replacement length
-
-## Warning in commentList[commentsAdded] &lt;- comment: number of items to replace is
-## not a multiple of replacement length
-
-## Warning in commentList[commentsAdded] &lt;- comment: number of items to replace is
-## not a multiple of replacement length
-
-## Warning in commentList[commentsAdded] &lt;- comment: number of items to replace is
-## not a multiple of replacement length
-
-## Warning in commentList[commentsAdded] &lt;- comment: number of items to replace is
-## not a multiple of replacement length
-
-## Warning in commentList[commentsAdded] &lt;- comment: number of items to replace is
-## not a multiple of replacement length
-
-## Warning in commentList[commentsAdded] &lt;- comment: number of items to replace is
-## not a multiple of replacement length
-
-## Warning in commentList[commentsAdded] &lt;- comment: number of items to replace is
-## not a multiple of replacement length
-
-## Warning in commentList[commentsAdded] &lt;- comment: number of items to replace is
-## not a multiple of replacement length
-
-## Warning in commentList[commentsAdded] &lt;- comment: number of items to replace is
-## not a multiple of replacement length
-
-## Warning in commentList[commentsAdded] &lt;- comment: number of items to replace is
-## not a multiple of replacement length
-
-## Warning in commentList[commentsAdded] &lt;- comment: number of items to replace is
-## not a multiple of replacement length
-
-## Warning in commentList[commentsAdded] &lt;- comment: number of items to replace is
-## not a multiple of replacement length
-
-## Warning in commentList[commentsAdded] &lt;- comment: number of items to replace is
-## not a multiple of replacement length
-
-## Warning in commentList[commentsAdded] &lt;- comment: number of items to replace is
-## not a multiple of replacement length
-
-## Warning in commentList[commentsAdded] &lt;- comment: number of items to replace is
-## not a multiple of replacement length
-
-## Warning in commentList[commentsAdded] &lt;- comment: number of items to replace is
-## not a multiple of replacement length
-
-## Warning in commentList[commentsAdded] &lt;- comment: number of items to replace is
-## not a multiple of replacement length
-
-## Warning in commentList[commentsAdded] &lt;- comment: number of items to replace is
-## not a multiple of replacement length
-
-## Warning in commentList[commentsAdded] &lt;- comment: number of items to replace is
-## not a multiple of replacement length
-
-## Warning in commentList[commentsAdded] &lt;- comment: number of items to replace is
-## not a multiple of replacement length
-
-## Warning in commentList[commentsAdded] &lt;- comment: number of items to replace is
-## not a multiple of replacement length
-
-## Warning in commentList[commentsAdded] &lt;- comment: number of items to replace is
-## not a multiple of replacement length
-
-## Warning in commentList[commentsAdded] &lt;- comment: number of items to replace is
-## not a multiple of replacement length
-
-## Warning in commentList[commentsAdded] &lt;- comment: number of items to replace is
-## not a multiple of replacement length
-
-## Warning in commentList[commentsAdded] &lt;- comment: number of items to replace is
-## not a multiple of replacement length
-
-## Warning in commentList[commentsAdded] &lt;- comment: number of items to replace is
-## not a multiple of replacement length
-
-## Warning in commentList[commentsAdded] &lt;- comment: number of items to replace is
-## not a multiple of replacement length
-
-## Warning in commentList[commentsAdded] &lt;- comment: number of items to replace is
-## not a multiple of replacement length
-
-## Warning in commentList[commentsAdded] &lt;- comment: number of items to replace is
-## not a multiple of replacement length
-
-## Warning in commentList[commentsAdded] &lt;- comment: number of items to replace is
-## not a multiple of replacement length
-
-## Warning in commentList[commentsAdded] &lt;- comment: number of items to replace is
-## not a multiple of replacement length
-
-## Warning in commentList[commentsAdded] &lt;- comment: number of items to replace is
-## not a multiple of replacement length
-
-## Warning in commentList[commentsAdded] &lt;- comment: number of items to replace is
-## not a multiple of replacement length
-
-## Warning in commentList[commentsAdded] &lt;- comment: number of items to replace is
-## not a multiple of replacement length
-
-## Warning in commentList[commentsAdded] &lt;- comment: number of items to replace is
-## not a multiple of replacement length
-
-## Warning in commentList[commentsAdded] &lt;- comment: number of items to replace is
-## not a multiple of replacement length
-
-## Warning in commentList[commentsAdded] &lt;- comment: number of items to replace is
-## not a multiple of replacement length
-
-## Warning in commentList[commentsAdded] &lt;- comment: number of items to replace is
-## not a multiple of replacement length
-
-## Warning in commentList[commentsAdded] &lt;- comment: number of items to replace is
-## not a multiple of replacement length
-
-## Warning in commentList[commentsAdded] &lt;- comment: number of items to replace is
-## not a multiple of replacement length
-
-## Warning in commentList[commentsAdded] &lt;- comment: number of items to replace is
-## not a multiple of replacement length
-
-## Warning in commentList[commentsAdded] &lt;- comment: number of items to replace is
-## not a multiple of replacement length
-
-## Warning in commentList[commentsAdded] &lt;- comment: number of items to replace is
-## not a multiple of replacement length
-
-## Warning in commentList[commentsAdded] &lt;- comment: number of items to replace is
-## not a multiple of replacement length
-
-## Warning in commentList[commentsAdded] &lt;- comment: number of items to replace is
-## not a multiple of replacement length
-
-## Warning in commentList[commentsAdded] &lt;- comment: number of items to replace is
-## not a multiple of replacement length
-
-## Warning in commentList[commentsAdded] &lt;- comment: number of items to replace is
-## not a multiple of replacement length
-
-## Warning in commentList[commentsAdded] &lt;- comment: number of items to replace is
-## not a multiple of replacement length
-
-## Warning in commentList[commentsAdded] &lt;- comment: number of items to replace is
-## not a multiple of replacement length
-
-## Warning in commentList[commentsAdded] &lt;- comment: number of items to replace is
-## not a multiple of replacement length
-
-## Warning in commentList[commentsAdded] &lt;- comment: number of items to replace is
-## not a multiple of replacement length
-
-## Warning in commentList[commentsAdded] &lt;- comment: number of items to replace is
-## not a multiple of replacement length
-
-## Warning in commentList[commentsAdded] &lt;- comment: number of items to replace is
-## not a multiple of replacement length
-
-## Warning in commentList[commentsAdded] &lt;- comment: number of items to replace is
-## not a multiple of replacement length
-
-## Warning in commentList[commentsAdded] &lt;- comment: number of items to replace is
-## not a multiple of replacement length
-
-## Warning in commentList[commentsAdded] &lt;- comment: number of items to replace is
-## not a multiple of replacement length
-
-## Warning in commentList[commentsAdded] &lt;- comment: number of items to replace is
-## not a multiple of replacement length
-
-## Warning in commentList[commentsAdded] &lt;- comment: number of items to replace is
-## not a multiple of replacement length
-
-## Warning in commentList[commentsAdded] &lt;- comment: number of items to replace is
-## not a multiple of replacement length
-
-## Warning in commentList[commentsAdded] &lt;- comment: number of items to replace is
-## not a multiple of replacement length
-
-## Warning in commentList[commentsAdded] &lt;- comment: number of items to replace is
-## not a multiple of replacement length
-
-## Warning in commentList[commentsAdded] &lt;- comment: number of items to replace is
-## not a multiple of replacement length
-
-## Warning in commentList[commentsAdded] &lt;- comment: number of items to replace is
-## not a multiple of replacement length
-
-## Warning in commentList[commentsAdded] &lt;- comment: number of items to replace is
-## not a multiple of replacement length
-
-## Warning in commentList[commentsAdded] &lt;- comment: number of items to replace is
-## not a multiple of replacement length
-
-## Warning in commentList[commentsAdded] &lt;- comment: number of items to replace is
-## not a multiple of replacement length
-
-## Warning in commentList[commentsAdded] &lt;- comment: number of items to replace is
-## not a multiple of replacement length
-
-## Warning in commentList[commentsAdded] &lt;- comment: number of items to replace is
-## not a multiple of replacement length
-
-## Warning in commentList[commentsAdded] &lt;- comment: number of items to replace is
-## not a multiple of replacement length
-
-## Warning in commentList[commentsAdded] &lt;- comment: number of items to replace is
-## not a multiple of replacement length
-
-## Warning in commentList[commentsAdded] &lt;- comment: number of items to replace is
-## not a multiple of replacement length
-
-## Warning in commentList[commentsAdded] &lt;- comment: number of items to replace is
-## not a multiple of replacement length
-
-## Warning in commentList[commentsAdded] &lt;- comment: number of items to replace is
-## not a multiple of replacement length
-
-## Warning in commentList[commentsAdded] &lt;- comment: number of items to replace is
-## not a multiple of replacement length
-
-## Warning in commentList[commentsAdded] &lt;- comment: number of items to replace is
-## not a multiple of replacement length
-
-## Warning in commentList[commentsAdded] &lt;- comment: number of items to replace is
-## not a multiple of replacement length
-
-## Warning in commentList[commentsAdded] &lt;- comment: number of items to replace is
-## not a multiple of replacement length
-
-## Warning in commentList[commentsAdded] &lt;- comment: number of items to replace is
-## not a multiple of replacement length
-
-## Warning in commentList[commentsAdded] &lt;- comment: number of items to replace is
-## not a multiple of replacement length
-
-## Warning in commentList[commentsAdded] &lt;- comment: number of items to replace is
-## not a multiple of replacement length
-
-## Warning in commentList[commentsAdded] &lt;- comment: number of items to replace is
-## not a multiple of replacement length
-
-## Warning in commentList[commentsAdded] &lt;- comment: number of items to replace is
-## not a multiple of replacement length
-
-## Warning in commentList[commentsAdded] &lt;- comment: number of items to replace is
-## not a multiple of replacement length
-
-## Warning in commentList[commentsAdded] &lt;- comment: number of items to replace is
-## not a multiple of replacement length
-
-## Warning in commentList[commentsAdded] &lt;- comment: number of items to replace is
-## not a multiple of replacement length
-
-## Warning in commentList[commentsAdded] &lt;- comment: number of items to replace is
-## not a multiple of replacement length
-
-## Warning in commentList[commentsAdded] &lt;- comment: number of items to replace is
-## not a multiple of replacement length
-
-## Warning in commentList[commentsAdded] &lt;- comment: number of items to replace is
-## not a multiple of replacement length
-
-## Warning in commentList[commentsAdded] &lt;- comment: number of items to replace is
-## not a multiple of replacement length
-
-## Warning in commentList[commentsAdded] &lt;- comment: number of items to replace is
-## not a multiple of replacement length
-
-## Warning in commentList[commentsAdded] &lt;- comment: number of items to replace is
-## not a multiple of replacement length
-
-## Warning in commentList[commentsAdded] &lt;- comment: number of items to replace is
-## not a multiple of replacement length
-
-## Warning in commentList[commentsAdded] &lt;- comment: number of items to replace is
-## not a multiple of replacement length
-
-## Warning in commentList[commentsAdded] &lt;- comment: number of items to replace is
-## not a multiple of replacement length
-
-## Warning in commentList[commentsAdded] &lt;- comment: number of items to replace is
-## not a multiple of replacement length
-
-## Warning in commentList[commentsAdded] &lt;- comment: number of items to replace is
-## not a multiple of replacement length
-
-## Warning in commentList[commentsAdded] &lt;- comment: number of items to replace is
-## not a multiple of replacement length
-
-## Warning in commentList[commentsAdded] &lt;- comment: number of items to replace is
-## not a multiple of replacement length
-
-## Warning in commentList[commentsAdded] &lt;- comment: number of items to replace is
-## not a multiple of replacement length
-
-## Warning in commentList[commentsAdded] &lt;- comment: number of items to replace is
-## not a multiple of replacement length
-
-## Warning in commentList[commentsAdded] &lt;- comment: number of items to replace is
-## not a multiple of replacement length
-
-## Warning in commentList[commentsAdded] &lt;- comment: number of items to replace is
-## not a multiple of replacement length
-
-## Warning in commentList[commentsAdded] &lt;- comment: number of items to replace is
-## not a multiple of replacement length
-
-## Warning in commentList[commentsAdded] &lt;- comment: number of items to replace is
-## not a multiple of replacement length
-
-## Warning in commentList[commentsAdded] &lt;- comment: number of items to replace is
-## not a multiple of replacement length
-
-## Warning in commentList[commentsAdded] &lt;- comment: number of items to replace is
-## not a multiple of replacement length
-
-## Warning in commentList[commentsAdded] &lt;- comment: number of items to replace is
-## not a multiple of replacement length
-
-## Warning in commentList[commentsAdded] &lt;- comment: number of items to replace is
-## not a multiple of replacement length
-
-## Warning in commentList[commentsAdded] &lt;- comment: number of items to replace is
-## not a multiple of replacement length
-
-## Warning in commentList[commentsAdded] &lt;- comment: number of items to replace is
-## not a multiple of replacement length
-
-## Warning in commentList[commentsAdded] &lt;- comment: number of items to replace is
-## not a multiple of replacement length
-
-## Warning in commentList[commentsAdded] &lt;- comment: number of items to replace is
-## not a multiple of replacement length
-
-## Warning in commentList[commentsAdded] &lt;- comment: number of items to replace is
-## not a multiple of replacement length
-
-## Warning in commentList[commentsAdded] &lt;- comment: number of items to replace is
-## not a multiple of replacement length
-
-## Warning in commentList[commentsAdded] &lt;- comment: number of items to replace is
-## not a multiple of replacement length
-
-## Warning in commentList[commentsAdded] &lt;- comment: number of items to replace is
-## not a multiple of replacement length
-
-## Warning in commentList[commentsAdded] &lt;- comment: number of items to replace is
-## not a multiple of replacement length
-
-## Warning in commentList[commentsAdded] &lt;- comment: number of items to replace is
-## not a multiple of replacement length
-
-## Warning in commentList[commentsAdded] &lt;- comment: number of items to replace is
-## not a multiple of replacement length
-
-## Warning in commentList[commentsAdded] &lt;- comment: number of items to replace is
-## not a multiple of replacement length
-
-## Warning in commentList[commentsAdded] &lt;- comment: number of items to replace is
-## not a multiple of replacement length
-
-## Warning in commentList[commentsAdded] &lt;- comment: number of items to replace is
-## not a multiple of replacement length
-
-## Warning in commentList[commentsAdded] &lt;- comment: number of items to replace is
-## not a multiple of replacement length
-
-## Warning in commentList[commentsAdded] &lt;- comment: number of items to replace is
-## not a multiple of replacement length
-
-## Warning in commentList[commentsAdded] &lt;- comment: number of items to replace is
-## not a multiple of replacement length
-
-## Warning in commentList[commentsAdded] &lt;- comment: number of items to replace is
-## not a multiple of replacement length
-
-## Warning in commentList[commentsAdded] &lt;- comment: number of items to replace is
-## not a multiple of replacement length
-
-## Warning in commentList[commentsAdded] &lt;- comment: number of items to replace is
-## not a multiple of replacement length
-
-## Warning in commentList[commentsAdded] &lt;- comment: number of items to replace is
-## not a multiple of replacement length
-
-## Warning in commentList[commentsAdded] &lt;- comment: number of items to replace is
-## not a multiple of replacement length
-
-## Warning in commentList[commentsAdded] &lt;- comment: number of items to replace is
-## not a multiple of replacement length
-
-## Warning in commentList[commentsAdded] &lt;- comment: number of items to replace is
-## not a multiple of replacement length
-
-## Warning in commentList[commentsAdded] &lt;- comment: number of items to replace is
-## not a multiple of replacement length
-
-## Warning in commentList[commentsAdded] &lt;- comment: number of items to replace is
-## not a multiple of replacement length
-
-## Warning in commentList[commentsAdded] &lt;- comment: number of items to replace is
-## not a multiple of replacement length
-
-## Warning in commentList[commentsAdded] &lt;- comment: number of items to replace is
-## not a multiple of replacement length
-
-## Warning in commentList[commentsAdded] &lt;- comment: number of items to replace is
-## not a multiple of replacement length
-
-## Warning in commentList[commentsAdded] &lt;- comment: number of items to replace is
-## not a multiple of replacement length
-
-## Warning in commentList[commentsAdded] &lt;- comment: number of items to replace is
-## not a multiple of replacement length
-
-## Warning in commentList[commentsAdded] &lt;- comment: number of items to replace is
-## not a multiple of replacement length
-
-## Warning in commentList[commentsAdded] &lt;- comment: number of items to replace is
-## not a multiple of replacement length
-
-## Warning in commentList[commentsAdded] &lt;- comment: number of items to replace is
-## not a multiple of replacement length
-
-## Warning in commentList[commentsAdded] &lt;- comment: number of items to replace is
-## not a multiple of replacement length
-
-## Warning in commentList[commentsAdded] &lt;- comment: number of items to replace is
-## not a multiple of replacement length
-
-## Warning in commentList[commentsAdded] &lt;- comment: number of items to replace is
-## not a multiple of replacement length
-
-## Warning in commentList[commentsAdded] &lt;- comment: number of items to replace is
-## not a multiple of replacement length
-
-## Warning in commentList[commentsAdded] &lt;- comment: number of items to replace is
-## not a multiple of replacement length
-
-## Warning in commentList[commentsAdded] &lt;- comment: number of items to replace is
-## not a multiple of replacement length
-
-## Warning in commentList[commentsAdded] &lt;- comment: number of items to replace is
-## not a multiple of replacement length
-
-## Warning in commentList[commentsAdded] &lt;- comment: number of items to replace is
-## not a multiple of replacement length
-
-## Warning in commentList[commentsAdded] &lt;- comment: number of items to replace is
-## not a multiple of replacement length
-
-## Warning in commentList[commentsAdded] &lt;- comment: number of items to replace is
-## not a multiple of replacement length
-
-## Warning in commentList[commentsAdded] &lt;- comment: number of items to replace is
-## not a multiple of replacement length
-
-## Warning in commentList[commentsAdded] &lt;- comment: number of items to replace is
-## not a multiple of replacement length
-
-## Warning in commentList[commentsAdded] &lt;- comment: number of items to replace is
-## not a multiple of replacement length
-
-## Warning in commentList[commentsAdded] &lt;- comment: number of items to replace is
-## not a multiple of replacement length
-
-## Warning in commentList[commentsAdded] &lt;- comment: number of items to replace is
-## not a multiple of replacement length
-
-## Warning in commentList[commentsAdded] &lt;- comment: number of items to replace is
-## not a multiple of replacement length
-
-## Warning in commentList[commentsAdded] &lt;- comment: number of items to replace is
-## not a multiple of replacement length
-
-## Warning in commentList[commentsAdded] &lt;- comment: number of items to replace is
-## not a multiple of replacement length
-
-## Warning in commentList[commentsAdded] &lt;- comment: number of items to replace is
-## not a multiple of replacement length
-
-## Warning in commentList[commentsAdded] &lt;- comment: number of items to replace is
-## not a multiple of replacement length
-
-## Warning in commentList[commentsAdded] &lt;- comment: number of items to replace is
-## not a multiple of replacement length
-
-## Warning in commentList[commentsAdded] &lt;- comment: number of items to replace is
-## not a multiple of replacement length
-
-## Warning in commentList[commentsAdded] &lt;- comment: number of items to replace is
-## not a multiple of replacement length
-
-## Warning in commentList[commentsAdded] &lt;- comment: number of items to replace is
-## not a multiple of replacement length
-
-## Warning in commentList[commentsAdded] &lt;- comment: number of items to replace is
-## not a multiple of replacement length
-
-## Warning in commentList[commentsAdded] &lt;- comment: number of items to replace is
-## not a multiple of replacement length
-
-## Warning in commentList[commentsAdded] &lt;- comment: number of items to replace is
-## not a multiple of replacement length
-
-## Warning in commentList[commentsAdded] &lt;- comment: number of items to replace is
-## not a multiple of replacement length
-
-## Warning in commentList[commentsAdded] &lt;- comment: number of items to replace is
-## not a multiple of replacement length
-
-## Warning in commentList[commentsAdded] &lt;- comment: number of items to replace is
-## not a multiple of replacement length
-
-## Warning in commentList[commentsAdded] &lt;- comment: number of items to replace is
-## not a multiple of replacement length
-
-## Warning in commentList[commentsAdded] &lt;- comment: number of items to replace is
-## not a multiple of replacement length
-
-## Warning in commentList[commentsAdded] &lt;- comment: number of items to replace is
-## not a multiple of replacement length
-
-## Warning in commentList[commentsAdded] &lt;- comment: number of items to replace is
-## not a multiple of replacement length
-
-## Warning in commentList[commentsAdded] &lt;- comment: number of items to replace is
-## not a multiple of replacement length
-
-## Warning in commentList[commentsAdded] &lt;- comment: number of items to replace is
-## not a multiple of replacement length
-
-## Warning in commentList[commentsAdded] &lt;- comment: number of items to replace is
-## not a multiple of replacement length
-
-## Warning in commentList[commentsAdded] &lt;- comment: number of items to replace is
-## not a multiple of replacement length
-
-## Warning in commentList[commentsAdded] &lt;- comment: number of items to replace is
-## not a multiple of replacement length
-
-## Warning in commentList[commentsAdded] &lt;- comment: number of items to replace is
-## not a multiple of replacement length
-
-## Warning in commentList[commentsAdded] &lt;- comment: number of items to replace is
-## not a multiple of replacement length
-
-## Warning in commentList[commentsAdded] &lt;- comment: number of items to replace is
-## not a multiple of replacement length
-
-## Warning in commentList[commentsAdded] &lt;- comment: number of items to replace is
-## not a multiple of replacement length
-
-## Warning in commentList[commentsAdded] &lt;- comment: number of items to replace is
-## not a multiple of replacement length
-
-## Warning in commentList[commentsAdded] &lt;- comment: number of items to replace is
-## not a multiple of replacement length
-
-## Warning in commentList[commentsAdded] &lt;- comment: number of items to replace is
-## not a multiple of replacement length
-
-## Warning in commentList[commentsAdded] &lt;- comment: number of items to replace is
-## not a multiple of replacement length
-
-## Warning in commentList[commentsAdded] &lt;- comment: number of items to replace is
-## not a multiple of replacement length
-
-## Warning in commentList[commentsAdded] &lt;- comment: number of items to replace is
-## not a multiple of replacement length
-
-## Warning in commentList[commentsAdded] &lt;- comment: number of items to replace is
-## not a multiple of replacement length
-
-## Warning in commentList[commentsAdded] &lt;- comment: number of items to replace is
-## not a multiple of replacement length
-
-## Warning in commentList[commentsAdded] &lt;- comment: number of items to replace is
-## not a multiple of replacement length
-
-## Warning in commentList[commentsAdded] &lt;- comment: number of items to replace is
-## not a multiple of replacement length
-
-## Warning in commentList[commentsAdded] &lt;- comment: number of items to replace is
-## not a multiple of replacement length
-
-## Warning in commentList[commentsAdded] &lt;- comment: number of items to replace is
-## not a multiple of replacement length
-
-## Warning in commentList[commentsAdded] &lt;- comment: number of items to replace is
-## not a multiple of replacement length
-
-## Warning in commentList[commentsAdded] &lt;- comment: number of items to replace is
-## not a multiple of replacement length
-
-## Warning in commentList[commentsAdded] &lt;- comment: number of items to replace is
-## not a multiple of replacement length
-
-## Warning in commentList[commentsAdded] &lt;- comment: number of items to replace is
-## not a multiple of replacement length
-
-## Warning in commentList[commentsAdded] &lt;- comment: number of items to replace is
-## not a multiple of replacement length
-
-## Warning in commentList[commentsAdded] &lt;- comment: number of items to replace is
-## not a multiple of replacement length
-
-## Warning in commentList[commentsAdded] &lt;- comment: number of items to replace is
-## not a multiple of replacement length
-
-## Warning in commentList[commentsAdded] &lt;- comment: number of items to replace is
-## not a multiple of replacement length
-
-## Warning in commentList[commentsAdded] &lt;- comment: number of items to replace is
-## not a multiple of replacement length
-
-## Warning in commentList[commentsAdded] &lt;- comment: number of items to replace is
-## not a multiple of replacement length
-
-## Warning in commentList[commentsAdded] &lt;- comment: number of items to replace is
-## not a multiple of replacement length
-
-## Warning in commentList[commentsAdded] &lt;- comment: number of items to replace is
-## not a multiple of replacement length
-
-## Warning in commentList[commentsAdded] &lt;- comment: number of items to replace is
-## not a multiple of replacement length
-
-## Warning in commentList[commentsAdded] &lt;- comment: number of items to replace is
-## not a multiple of replacement length
-
-## Warning in commentList[commentsAdded] &lt;- comment: number of items to replace is
-## not a multiple of replacement length
-
-## Warning in commentList[commentsAdded] &lt;- comment: number of items to replace is
-## not a multiple of replacement length
-
-## Warning in commentList[commentsAdded] &lt;- comment: number of items to replace is
-## not a multiple of replacement length
-
-## Warning in commentList[commentsAdded] &lt;- comment: number of items to replace is
-## not a multiple of replacement length
-
-## Warning in commentList[commentsAdded] &lt;- comment: number of items to replace is
-## not a multiple of replacement length
-
-## Warning in commentList[commentsAdded] &lt;- comment: number of items to replace is
-## not a multiple of replacement length
-
-## Warning in commentList[commentsAdded] &lt;- comment: number of items to replace is
-## not a multiple of replacement length
-
-## Warning in commentList[commentsAdded] &lt;- comment: number of items to replace is
-## not a multiple of replacement length
-
-## Warning in commentList[commentsAdded] &lt;- comment: number of items to replace is
-## not a multiple of replacement length
-
-## Warning in commentList[commentsAdded] &lt;- comment: number of items to replace is
-## not a multiple of replacement length
-
-## Warning in commentList[commentsAdded] &lt;- comment: number of items to replace is
-## not a multiple of replacement length
-
-## Warning in commentList[commentsAdded] &lt;- comment: number of items to replace is
-## not a multiple of replacement length
-
-## Warning in commentList[commentsAdded] &lt;- comment: number of items to replace is
-## not a multiple of replacement length
-
-## Warning in commentList[commentsAdded] &lt;- comment: number of items to replace is
-## not a multiple of replacement length
-
-## Warning in commentList[commentsAdded] &lt;- comment: number of items to replace is
-## not a multiple of replacement length
-
-## Warning in commentList[commentsAdded] &lt;- comment: number of items to replace is
-## not a multiple of replacement length
-
-## Warning in commentList[commentsAdded] &lt;- comment: number of items to replace is
-## not a multiple of replacement length
-
-## Warning in commentList[commentsAdded] &lt;- comment: number of items to replace is
-## not a multiple of replacement length
-
-## Warning in commentList[commentsAdded] &lt;- comment: number of items to replace is
-## not a multiple of replacement length
-
-## Warning in commentList[commentsAdded] &lt;- comment: number of items to replace is
-## not a multiple of replacement length
-
-## Warning in commentList[commentsAdded] &lt;- comment: number of items to replace is
-## not a multiple of replacement length
-
-## Warning in commentList[commentsAdded] &lt;- comment: number of items to replace is
-## not a multiple of replacement length
-
-## Warning in commentList[commentsAdded] &lt;- comment: number of items to replace is
-## not a multiple of replacement length
-
-## Warning in commentList[commentsAdded] &lt;- comment: number of items to replace is
-## not a multiple of replacement length
-
-## Warning in commentList[commentsAdded] &lt;- comment: number of items to replace is
-## not a multiple of replacement length
-
-## Warning in commentList[commentsAdded] &lt;- comment: number of items to replace is
-## not a multiple of replacement length
-
-## Warning in commentList[commentsAdded] &lt;- comment: number of items to replace is
-## not a multiple of replacement length
-
-## Warning in commentList[commentsAdded] &lt;- comment: number of items to replace is
-## not a multiple of replacement length
-
-## Warning in commentList[commentsAdded] &lt;- comment: number of items to replace is
-## not a multiple of replacement length
-
-## Warning in commentList[commentsAdded] &lt;- comment: number of items to replace is
-## not a multiple of replacement length</code></pre>
-<pre><code>## Warning in addDataFrame(commentDF, s, col.names = TRUE, row.names = FALSE, :
-## Some cells exceed Excel's limit of 32767 characters and they will be truncated
-
-## Warning in addDataFrame(commentDF, s, col.names = TRUE, row.names = FALSE, :
-## Some cells exceed Excel's limit of 32767 characters and they will be truncated</code></pre>
+<p>The function <code>getCommentDf()</code>, called below, uses nested loops in the form:</p>
+<ul>
+<li><p><code>while (not enough comments) {</code></p></li>
+<li><p><code>for (each page in a batch) {</code></p></li>
+<li><p><code>for (each comment on a page) {</code></p></li>
+<li><p><code>do stuff}}}</code></p></li>
+</ul>
+<p>to add comments one by one to a data frame that carries their <code>attributes</code>, both those pulled from the comment itself and from the getAttachmentDetails() function. It also generates a list of the comments themselves. By default it downloads attachments too, but this can be turned off by setting <code>doDownload = FALSE</code>, in which case it will try to read text previously downloaded to attachmentsDest</p>
+<pre class="r"><code>dataPath &lt;- &quot;archived_data&quot;
+atchPath &lt;- &quot;attachments&quot; 
+
+docketID &lt;- &quot;HHS-OASH-2022-0005&quot;
+
+OIDs &lt;- getOIDs(docketID, &quot;Notice&quot;)
+
+for (o in OIDs) {
+  df &lt;- getCommentDf(o, dataDest = dataPath, attachmentsDest = atchPath)
+}</code></pre>
 </div>
 </div>
 <div id="possible-improvements" class="section level1">
 <h1>Possible Improvements</h1>
-<ol start="0" style="list-style-type: decimal">
-<li>Fix “comment + attachment” cell in download function</li>
-<li>Find way of saving comments–as downloaded–separately, perhaps in one long list</li>
+<ol start="2" style="list-style-type: decimal">
 <li>Make unified PDF of all downloaded attachments</li>
 </ol>
 <p>2.1) including combining multi-part comments like EDF (9240 &amp;c) and NRDC (9299 &amp;c)</p>
-<p>2.2) fix document ordering (removed because sometimes seems discontinuous?)</p>
 <ol start="4" style="list-style-type: decimal">
 <li><p>OCR with PDFtools?</p></li>
 <li><p>Statistical characterization:</p></li>
@@ -1959,9 +635,8 @@ if (demo) {
 </ol>
 <p>** 10) Look for homology with mass mail comments – code for text matching For mad-libs – pull distinctive phrases (maybe matches 3 of 4)</p>
 <ol start="11" style="list-style-type: decimal">
-<li><p>See if filtering by date or character count can help us find some oppposing comments</p></li>
-<li><p>Download and save the original comments and files to something that’s sync’d with GitHub</p></li>
-<li>Create samples to read and memo on</li>
+<li><p>See if filtering by date or character count can help us find some supporting comments</p></li>
+<li><p>Create samples to read and memo on</p></li>
 </ol>
 <ul>
 <li>samples from organized cluster – to understand flavor &amp; variations</li>
@@ -1991,6 +666,14 @@ if (demo) {
 <li>PDF error: read ICCBased color space profile error</li>
 <li>PDF error: not an ICC profile, invalid signature</li>
 <li>PDF error: invalid font weight</li>
+</ul>
+</div>
+<div id="goals-for-august" class="section level2">
+<h2>Goals for August:</h2>
+<ul>
+<li>Generate a list of non-PDFs or restricted files</li>
+<li>Find a way of discovering non-parsed PDFs (and generate list of those)</li>
+<li>Find R code for text-matching comments to each other or to mass-mail language</li>
 </ul>
 </div>
 </div>
